@@ -113,8 +113,7 @@ class FJSPEnv:
         # Candidate processing times and masks
         self.candidate_pt = np.array([self.op_pt[k, self.candidate[k]] for k in range(self.number_of_envs)])  ### 非法记得置为-1
         dynamic_pair = np.array([self.process_relation[k, self.candidate[k]] for k in range(self.number_of_envs)])
-        self.dynamic_pair_mask = np.copy(~dynamic_pair)
-        self.candidate_process_relation = np.copy(self.dynamic_pair_mask)
+        self.candidate_process_relation = np.copy(~dynamic_pair)
 
         # Construct features
         self.construct_candidate_features() # [B,J,8]
@@ -126,7 +125,7 @@ class FJSPEnv:
         self.max_endTime = self.init_quality
 
         self.old_state.update(self.fea_j,self.fea_m,self.fea_pairs,self.candidate,self.mask,
-                              self.dynamic_pair_mask,self.device)
+                              self.candidate_process_relation, self.device)
 
         self.old_op_ct_lb = np.copy(self.op_ct_lb)
         self.old_init_quality = np.copy(self.init_quality)
@@ -150,8 +149,8 @@ class FJSPEnv:
         self.max_endTime = self.init_quality
         self.candidate_pt = np.copy(self.old_candidate_pt)
         self.candidate_process_relation = np.copy(self.old_candidate_process_relation)
-        self.compatible_op = np.copy(self.compatible_op)
-        self.compatible_mch = np.copy(self.compatible_mch)
+        self.compatible_op = np.copy(self.old_compatible_op)
+        self.compatible_mch = np.copy(self.old_compatible_mch)
 
         # copy the old state
         self.state = copy.deepcopy(self.old_state)
@@ -168,7 +167,6 @@ class FJSPEnv:
         # the complete time of operations ([E,N])
         self.op_ct = np.zeros((self.number_of_envs, self.number_of_ops))
         self.mch_free_time = np.zeros((self.number_of_envs, self.number_of_machines))
-
         self.candidate_free_time = np.zeros((self.number_of_envs, self.number_of_jobs))
 
         self.true_op_ct = np.zeros((self.number_of_envs, self.number_of_ops))
@@ -185,79 +183,85 @@ class FJSPEnv:
         self.env_done = np.zeros(self.number_of_envs,dtype=bool)
 
 
-    def step(self,actions):
+    def step(self, actions):
         """
             perform the state transition & return the next state and reward
             :param actions: the action list with shape [E]
             :return: the next state, reward and the done flag
         """
+        active_idx = np.where(~self.env_done)[0]
+
         chosen_job = actions // self.number_of_machines
         chosen_mch = actions % self.number_of_machines
-        chosen_op = self.candidate[self.env_idxs, chosen_job]
 
-        self.step_count += 1
+        active_job = chosen_job[active_idx]
+        active_machine = chosen_mch[active_idx]
+        chosen_op = self.candidate[active_idx, active_job]
 
-        for i in range(self.number_of_envs):
-            self.env_done[i] = (self.step_count >= self.number_of_ops_per_env[i])  ####
-
-        active_envs = ~ self.env_done # (B,) 还没调度完的环境是 True
-
-        if (self.reverse_process_relation[self.env_idxs[active_envs], chosen_op[active_envs], chosen_mch[active_envs]]).any():
+        # 合法性检查
+        if (self.reverse_process_relation[active_idx, chosen_op, active_machine]).any():
             print(
                 f'FJSP_Env.py Error from choosing action: Op {chosen_op} can\'t be processed by Mch {chosen_mch}')
             sys.exit()
 
-        # update candidate and message
-        candidate_add_flag = (chosen_op != self.job_last_op_id[self.env_idxs, chosen_job]) & active_envs # 候选动作推进flag，只要选择的动作不是工件最后一个操作
-        self.candidate[self.env_idxs, chosen_job] += candidate_add_flag # 那么对应的工件就+1
-        self.mask[self.env_idxs, chosen_job] = np.where(active_envs, ~candidate_add_flag, self.mask[self.env_idxs, chosen_job])
-        # 仅对 “活跃环境（active_envs=True）” 的位置，用 ~candidate_add_flag 覆盖原有值；对 “非活跃环境（active_envs=False）” 的位置，保留 self.mask 原有值不变
-        pt = self.unmasked_op_pt[self.env_idxs, chosen_op, chosen_mch] * active_envs  # (B,) 每个环境中选择的操作的加工时间
-        self.mch_cum_load[self.env_idxs, chosen_mch] += pt
+        # 候选工序推进
+        active_has_next = (chosen_op != self.job_last_op_id[active_idx, active_job])   # 是否还有下一道工序
+        self.candidate[active_idx[active_has_next], active_job[active_has_next]] += 1  # 那么对应的工件就+1
+        self.mask[active_idx[~active_has_next], active_job[~active_has_next]] = True   # (B,J)
 
-        mask_temp = candidate_add_flag # 用来作为布尔掩码把env分成两组
-        self.candidate_pt[mask_temp, chosen_job[mask_temp]] = self.unmasked_op_pt[mask_temp, chosen_op[mask_temp] + 1] # 更新候选操作的加工时间
-        self.candidate_process_relation[mask_temp, chosen_job[mask_temp]] = self.reverse_process_relation[mask_temp, chosen_op[mask_temp] + 1] # 更新可行性关系
+        next_env = active_idx[active_has_next]
+        next_job = active_job[active_has_next]
+        next_op = chosen_op[active_has_next] + 1
 
-        finished_job_mask = (~mask_temp) & active_envs
-        self.candidate_process_relation[finished_job_mask, chosen_job[finished_job_mask]] = 1 # 对于已经完成加工的工件，全部置为1
-        self.dynamic_pair_mask = np.copy(self.candidate_process_relation)  ### 这个变量可以不要
+        self.candidate_pt[next_env, next_job] = self.unmasked_op_pt[next_env, next_op]  # 更新候选操作的加工时间
+        self.candidate_process_relation[next_env, next_job] = self.reverse_process_relation[next_env, next_op] # 更新可行性关系
+        self.candidate_process_relation[active_idx[~active_has_next], active_job[~active_has_next]] = True
 
-        # the start processing time of chosen operations
-        chosen_op_st = np.maximum(self.candidate_free_time[self.env_idxs, chosen_job],self.mch_free_time[self.env_idxs, chosen_mch]) # 候选工件释放时间与目标机器释放时间，选大的那个时间
-        self.op_ct[self.env_idxs, chosen_op] = np.where(active_envs, chosen_op_st + self.op_pt[self.env_idxs, chosen_op, chosen_mch], self.op_ct[self.env_idxs, chosen_op])
+        # 对活跃env做时间更新
+        chosen_op_st = np.maximum(self.candidate_free_time[active_idx, active_job],
+                                  self.mch_free_time[active_idx, active_machine])       # 本步操作的开始时间
 
-        idle_inc = np.maximum(0.0, chosen_op_st - self.mch_free_time[self.env_idxs, chosen_mch])
-        self.idle_acc[self.env_idxs, chosen_mch] += idle_inc * active_envs
+        chosen_op_pt = self.unmasked_op_pt[active_idx, chosen_op, active_machine]
+        self.op_ct[active_idx, chosen_op] = chosen_op_st + chosen_op_pt
 
-        self.candidate_free_time[self.env_idxs, chosen_job] = np.where(active_envs, self.op_ct[self.env_idxs, chosen_op], self.candidate_free_time[self.env_idxs, chosen_job])
-        self.mch_free_time[self.env_idxs, chosen_mch] = np.where(active_envs, self.op_ct[self.env_idxs, chosen_op], self.mch_free_time[self.env_idxs, chosen_mch])
+        self.mch_cum_load[active_idx, active_machine] += chosen_op_pt
 
-        true_chosen_op_st = np.maximum(self.true_candidate_free_time[self.env_idxs, chosen_job],self.true_mch_free_time[self.env_idxs, chosen_mch])
-        self.true_op_ct[self.env_idxs, chosen_op] = np.where(active_envs, true_chosen_op_st + self.true_op_pt[
-            self.env_idxs, chosen_op, chosen_mch], self.true_op_ct[self.env_idxs, chosen_op])
-        self.true_candidate_free_time[self.env_idxs, chosen_job] = np.where(active_envs,
-                                                                            self.true_op_ct[self.env_idxs, chosen_op],
-                                                                            self.true_candidate_free_time[
-                                                                                self.env_idxs, chosen_job])
-        self.true_mch_free_time[self.env_idxs, chosen_mch] = np.where(active_envs,
-                                                                      self.true_op_ct[self.env_idxs, chosen_op],
-                                                                      self.true_mch_free_time[
-                                                                          self.env_idxs, chosen_mch])
+        idle_inc = np.maximum(0.0, chosen_op_st - self.mch_free_time[active_idx, active_machine])
+        self.idle_acc[active_idx, active_machine] += idle_inc
 
-        self.current_makespan = np.maximum(self.current_makespan, self.true_op_ct[self.env_idxs, chosen_op])
+        self.candidate_free_time[active_idx, active_job] = self.op_ct[active_idx, chosen_op]
+        self.mch_free_time[active_idx, active_machine] = self.op_ct[active_idx, chosen_op]
+
+        # 真实时间更新
+        true_chosen_op_st = np.maximum(self.true_candidate_free_time[active_idx, active_job],
+                                       self.true_mch_free_time[active_idx, active_machine])
+        self.true_op_ct[active_idx, chosen_op] = true_chosen_op_st + self.true_op_pt[active_idx, chosen_op, active_machine]
+
+        self.true_candidate_free_time[active_idx, active_job] = self.true_op_ct[active_idx, chosen_op]
+        self.true_mch_free_time[active_idx, active_machine] = self.true_op_ct[active_idx, chosen_op]
+
+        self.current_makespan[active_idx] = np.maximum(self.current_makespan[active_idx],
+                                                       self.true_op_ct[active_idx, chosen_op])
+
+        diff = self.op_ct[active_idx, chosen_op] - self.op_ct_lb[active_idx, chosen_op]
+        # 对每个活跃env, 把该job从当前op到该job最后一个op的下界整体后移diff
+        for k in range(len(active_idx)):
+            e = active_idx[k]
+            j = active_job[k]
+            op = chosen_op[k]
+
+            start = op
+            end = self.job_last_op_id[e, j] + 1
+            self.op_ct_lb[e, start:end] += diff[k]
 
         self.construct_candidate_features()
-
         self.construct_mch_features()
-
         self.construct_pair_features()
 
-        diff = (self.op_ct[self.env_idxs, chosen_op] - self.op_ct_lb[self.env_idxs, chosen_op]) * active_envs
+        self.step_count += 1
 
-        mask1 = (self.op_idx >= chosen_op[:, np.newaxis]) & \
-                (self.op_idx < (self.job_last_op_id[self.env_idxs, chosen_job] + 1)[:,np.newaxis])
-        self.op_ct_lb[mask1] += np.tile(diff[:, np.newaxis], (1, self.number_of_ops))[mask1]
+        for i in range(self.number_of_envs):
+            self.env_done[i] = (self.step_count >= self.number_of_ops_per_env[i])
 
         # compute the reward : R_t = C_{LB}(s_{t}) - C_{LB}(s_{t+1})
         op_ct_lb_visible = np.where(self.op_valid_mask, self.op_ct_lb, 0)
@@ -266,10 +270,11 @@ class FJSPEnv:
 
         true_candidate = np.where(self.mask, -1, self.candidate)
 
-        self.state.update(self.fea_j, self.fea_m, self.fea_pairs,true_candidate, self.mask,
-                          self.dynamic_pair_mask,self.device)
+        self.state.update(self.fea_j, self.fea_m, self.fea_pairs, true_candidate, self.mask,
+                          self.candidate_process_relation, self.device)
 
         return self.state, np.array(reward), self.env_done
+
 
     def construct_candidate_features(self):
         """
@@ -304,14 +309,22 @@ class FJSPEnv:
         mask = self.mask[:,:,None]
         self.fea_j = np.where(mask, 0, self.fea_j)
 
-        # 针对已完工的工件进行归一化
-        if (~self.env_done).any():
-            num_left_nodes = np.sum(~self.mask, axis=1, keepdims=True) # 还剩多少工件
-            mean_fea_j = np.sum(self.fea_j, axis=1) / num_left_nodes
-            temp = np.where(mask, mean_fea_j[:, np.newaxis, :], self.fea_j)
+        # 每个env还有多少个有效节点
+        num_left_nodes = np.sum(~self.mask, axis=1, keepdims=True) # [B, 1]
+        valid_env = (num_left_nodes.squeeze(-1) > 0)               # [B]
+
+        if valid_env.any():
+            fea_j_valid = self.fea_j[valid_env]  # [Bv, J, 6]
+            mask_valid = mask[valid_env]         # [Bv, J, 1]
+            num_left_valid = num_left_nodes[valid_env]  # [Bv, 1]
+
+            mean_fea_j = np.sum(fea_j_valid, axis=1) / num_left_valid
+            temp = np.where(mask_valid, mean_fea_j[:, np.newaxis, :], fea_j_valid)
+
             var_fea_j = np.var(temp, axis=1)
-            std_fea_j = np.sqrt(var_fea_j * self.number_of_jobs / num_left_nodes)
-            self.fea_j = (temp - mean_fea_j[:, np.newaxis, :]) / \
+            std_fea_j = np.sqrt(var_fea_j * self.number_of_jobs / num_left_valid)
+
+            self.fea_j[valid_env] = (temp - mean_fea_j[:, np.newaxis, :]) / \
                          (std_fea_j[:, np.newaxis, :] + 1e-8)
 
     def construct_mch_features(self):

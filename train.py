@@ -171,7 +171,7 @@ class Trainer:
                     ep_et - ep_st))
 
             # validate the trained model
-            if (i_update+1) % self.validate_timestep == 0:
+            if (i_update) % self.validate_timestep == 0:
                 vali_result = self.validate_envs().mean() #####
                 if vali_result < self.record:
                     self.save_model()
@@ -212,15 +212,16 @@ class Trainer:
     def validate_envs(self):
         self.ppo.policy.eval()
         state = self.vali_env.reset()
-        done = np.zeros(self.num_envs, dtype=bool)
+        done = self.vali_env.env_done
         while not done.all():
             with torch.no_grad():
+                batch_idx = ~torch.from_numpy(done)
                 action_envs, _, _ = self.ppo.policy.act(
-                    state.fea_j_tensor,
-                    state.fea_m_tensor,
-                    state.fea_pairs_tensor,
-                    state.candidate_tensor,
-                    state.dynamic_pair_mask_tensor,
+                    state.fea_j_tensor[batch_idx],
+                    state.fea_m_tensor[batch_idx],
+                    state.fea_pairs_tensor[batch_idx],
+                    state.candidate_tensor[batch_idx],
+                    state.dynamic_pair_mask_tensor[batch_idx],
                 )
             state, _, done = self.vali_env.step(actions=action_envs.cpu().numpy())
         self.ppo.policy.train()

@@ -70,7 +70,7 @@ parser.add_argument('--minibatch_size', type=int, default=1024, help='Batch size
 parser.add_argument('--log_dir', type=str, default='./runs', help='Root directory for TensorBoard logs')
 parser.add_argument('--run_name', type=str, default='exp', help='Run name for TensorBoard logs')
 parser.add_argument('--log_interval', type=int, default=10, help='Interval (updates) for train/env logging')
-parser.add_argument('--use_tensorboard', type=str2bool, default=True, help='Whether to enable TensorBoard logging')
+parser.add_argument('--use_tensorboard', type=str2bool, default=False, help='Whether to enable TensorBoard logging')
 
 # args for test
 parser.add_argument('--test_data', nargs='+', default=['Brandimarte'], help='List of data for testing')
