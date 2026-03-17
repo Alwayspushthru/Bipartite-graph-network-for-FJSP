@@ -31,7 +31,7 @@ parser.add_argument('--seed_train', type=int, default=300, help='Seed for traini
 parser.add_argument('--seed_test', type=int, default=50, help='Seed for testing heuristics')
 
 # args for data load
-parser.add_argument('--data_source', type=str, default='SD1', help='Suffix of test data')
+parser.add_argument('--data_source', type=str, default='SD3', help='Suffix of test data')
 parser.add_argument('--model_source', type=str, default='SD2', help='Suffix of the data that model trained on')
 
 # args for network
@@ -70,7 +70,7 @@ parser.add_argument('--minibatch_size', type=int, default=1024, help='Batch size
 parser.add_argument('--log_dir', type=str, default='./runs', help='Root directory for TensorBoard logs')
 parser.add_argument('--run_name', type=str, default='exp', help='Run name for TensorBoard logs')
 parser.add_argument('--log_interval', type=int, default=10, help='Interval (updates) for train/env logging')
-parser.add_argument('--use_tensorboard', type=str2bool, default=False, help='Whether to enable TensorBoard logging')
+parser.add_argument('--use_tensorboard', type=str2bool, default=True, help='Whether to enable TensorBoard logging')
 
 # args for test
 parser.add_argument('--test_data', nargs='+', default=['Brandimarte'], help='List of data for testing')

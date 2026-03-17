@@ -73,8 +73,8 @@ class BiGraphNetwork(nn.Module):
         self.fea_m_input_dim = config.fea_m_input_dim  # 4
         self.fea_pairs_input_dim = config.fea_pair_input_dim  # 6
 
-        self.fea_embed_dim = 8
-        self.mes_dim = 32
+        self.fea_embed_dim = 128
+        self.mes_dim = 128
 
         self.num_BiG_layers = config.num_bigraph_layers
         self.BiG_layers = [BiGraphLayer(d = self.mes_dim) for _ in range(self.num_BiG_layers)]
@@ -83,19 +83,19 @@ class BiGraphNetwork(nn.Module):
         self.mach_mlp = MLP(2, self.fea_m_input_dim, self.fea_embed_dim,self.mes_dim)
         self.pair_mlp = MLP(2, self.fea_pairs_input_dim, self.fea_embed_dim,self.mes_dim)
 
-        self.linear_layer = nn.Linear(self.mes_dim, self.fea_embed_dim)
+        self.linear_layer = nn.Linear(self.mes_dim, 8)
 
-        self.actor = Actor(config.num_mlp_layers_actor, 5 * self.fea_embed_dim,
+        self.actor = Actor(config.num_mlp_layers_actor, 5 * 8,
             config.hidden_dim_actor,1,)
-        self.critic = Critic(config.num_mlp_layers_critic, 3 * self.fea_embed_dim,
+        self.critic = Critic(config.num_mlp_layers_critic, 3 * 8,
             config.hidden_dim_critic,1,)
 
     def forward(self, fea_j, fea_m, fea_pairs, dynamic_pair_mask):
         B,J,M = dynamic_pair_mask.shape
 
-        h_j = self.job_mlp(fea_j) # 6 → 8 → 32
-        h_m = self.mach_mlp(fea_m) # 4 → 8 → 32
-        h_pair = self.pair_mlp(fea_pairs) # 6 → 8 → 32
+        h_j = self.job_mlp(fea_j) # 6 →  →
+        h_m = self.mach_mlp(fea_m) # 4 →  →
+        h_pair = self.pair_mlp(fea_pairs) # 6 →  →
 
         for layer in self.BiG_layers:
                 h_j, h_m = layer(h_j, h_m, h_pair, dynamic_pair_mask)

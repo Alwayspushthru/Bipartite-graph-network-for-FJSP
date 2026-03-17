@@ -15,7 +15,7 @@ from env.FJSPEnv import FJSPEnv
 from model.ppo import PPO_initialize
 from model.ppo import Memory
 
-from utils.data_utils import CaseGenerator
+from utils.data_utils import CaseGenerator,SD3CaseGenerator
 
 str_time = time.strftime("%m%d_%H%M", time.localtime(time.time()))
 os.environ["CUDA_VISIBLE_DEVICES"] = configs.device_id
@@ -49,10 +49,10 @@ class Trainer:
         else:
             torch.set_default_device('cpu')
 
-        if self.data_source == 'SD1':
-            self.data_name = f'{self.n_j}x{self.n_m}'
-        elif self.data_source == 'SD2':
+        if self.data_source == 'SD2':
             self.data_name = f'{self.n_j}x{self.n_m}{strToSuffix(config.data_suffix)}'
+        else:
+            self.data_name = f'{self.n_j}x{self.n_m}'
 
         self.vali_data_path = f'./data/data_train_vali/{self.data_source}/{self.data_name}'
         self.test_data_path = f'./data/{self.data_source}/{self.data_name}'
@@ -171,7 +171,7 @@ class Trainer:
                     ep_et - ep_st))
 
             # validate the trained model
-            if (i_update) % self.validate_timestep == 0:
+            if (i_update + 1) % self.validate_timestep == 0:
                 vali_result = self.validate_envs().mean() #####
                 if vali_result < self.record:
                     self.save_model()
@@ -201,9 +201,12 @@ class Trainer:
                 case = CaseGenerator(self.n_j, self.n_m, self.op_per_job_min, self.op_per_job_max,
                                      nums_ope=prepare_JobLength, path='./test', flag_doc=False)
                 JobLength, OpPT, _ = case.get_case(i)
-
-            else:
+            elif self.data_source == 'SD2':
                 JobLength, OpPT, _ = SD2_instance_generator(config=self.config)
+            else:
+                case = SD3CaseGenerator(self.n_j, self.n_m, nums_ope=prepare_JobLength)  # 新的生成数据的方式
+                JobLength, OpPT, _ = case.get_case()
+
             dataset_JobLength.append(JobLength)
             dataset_OpPT.append(OpPT)
 

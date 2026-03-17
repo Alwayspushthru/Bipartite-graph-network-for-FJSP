@@ -183,7 +183,7 @@ def generate_data_to_files(seed, directory, config):
             os.makedirs(path)
 
         for idx in range(100):
-            case = CaseGenerator(n_j,n_m)
+            case = SD3CaseGenerator(n_j,n_m)
             job_length, op_pt, op_per_mch = case.get_case()
             lines_doc = matrix_to_text(job_length, op_pt, op_per_mch)
 
@@ -308,9 +308,95 @@ class CaseGenerator:
 
         return job_length, op_pt, self.num_options / self.num_opes
 
+class SD3CaseGenerator:
+    def __init__(self, job_init, num_mas, nums_ope=None, flag_same_opes = True):
+        self.num_jobs = job_init
+        self.num_mas = num_mas
+        if nums_ope is None:
+            nums_ope = []
+        self.nums_ope = nums_ope
+
+        self.flag_same_opes = flag_same_opes
+
+        self.mas_per_ope_min = 1  # The minimum number of machines that can process an operation
+        self.mas_per_ope_max = num_mas
+
+        self.opes_per_job_min = math.floor(0.8 * num_mas) # 向下取整
+        self.opes_per_job_max = math.ceil(1.2 * num_mas) # 向上取整
+
+        self.proctime_per_ope_min = 1  # Minimum average processing time
+        self.proctime_per_ope_max = 99
+
+        self.proctime_dev = 0.2
+
+    def get_case(self):
+        if not self.flag_same_opes:
+            self.nums_ope = [random.randint(self.opes_per_job_min, self.opes_per_job_max) for _ in range(self.num_jobs)]
+
+        self.num_opes = sum(self.nums_ope)
+
+        self.nums_option = [random.randint(self.mas_per_ope_min, self.mas_per_ope_max) for _ in range(self.num_opes)]
+        self.num_options = sum(self.nums_option)
+
+        self.ope_ma = [] # 每个操作对应的机器
+        for val in self.nums_option:
+            self.ope_ma = self.ope_ma + sorted(random.sample(range(1, self.num_mas + 1), val))
+        self.proc_time = []
+
+        self.proc_times_mean = [random.randint(self.proctime_per_ope_min, self.proctime_per_ope_max) for _ in
+                                range(self.num_opes)]
+        for i in range(len(self.nums_option)):
+            low_bound = max(self.proctime_per_ope_min, round(self.proc_times_mean[i] * (1 - self.proctime_dev)))
+            high_bound = min(self.proctime_per_ope_max, round(self.proc_times_mean[i] * (1 + self.proctime_dev)))
+            proc_time_ope = [random.randint(low_bound, high_bound) for _ in range(self.nums_option[i])]
+            self.proc_time = self.proc_time + proc_time_ope
+
+        self.num_ope_biass = [sum(self.nums_ope[0:i]) for i in range(self.num_jobs)]
+        self.num_ma_biass = [sum(self.nums_option[0:i]) for i in range(self.num_opes)]
+        line0 = '{0}\t{1}\t{2}\n'.format(self.num_jobs, self.num_mas, self.num_options / self.num_opes)
+        lines_doc = []
+        lines_doc.append('{0}\t{1}\t{2}'.format(self.num_jobs, self.num_mas, self.num_options / self.num_opes))
+        for i in range(self.num_jobs):
+            flag = 0
+            flag_time = 0
+            flag_new_ope = 1
+            idx_ope = -1
+            idx_ma = 0
+            line = []
+            option_max = sum(self.nums_option[self.num_ope_biass[i]:(self.num_ope_biass[i] + self.nums_ope[i])])
+            idx_option = 0
+            while True:
+                if flag == 0:
+                    line.append(self.nums_ope[i])
+                    flag += 1
+                elif flag == flag_new_ope:
+                    idx_ope += 1
+                    idx_ma = 0
+                    flag_new_ope += self.nums_option[self.num_ope_biass[i] + idx_ope] * 2 + 1
+                    line.append(self.nums_option[self.num_ope_biass[i] + idx_ope])
+                    flag += 1
+                elif flag_time == 0:
+                    line.append(self.ope_ma[self.num_ma_biass[self.num_ope_biass[i] + idx_ope] + idx_ma])
+                    flag += 1
+                    flag_time = 1
+                else:
+                    line.append(self.proc_time[self.num_ma_biass[self.num_ope_biass[i] + idx_ope] + idx_ma])
+                    flag += 1
+                    flag_time = 0
+                    idx_option += 1
+                    idx_ma += 1
+                if idx_option == option_max:
+                    str_line = " ".join([str(val) for val in line])
+                    lines_doc.append(str_line)
+                    break
+        job_length, op_pt = text_to_matrix(lines_doc)
+
+        return job_length, op_pt, self.num_options / self.num_opes
+
+
 
 def main():
-    seed_train_vali_datagen = 200
+    seed_train_vali_datagen = 100
     generate_data_to_files(seed_train_vali_datagen,
                            f'../data/SD3/',
                            configs)

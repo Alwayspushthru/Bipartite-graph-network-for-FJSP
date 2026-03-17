@@ -9,7 +9,7 @@ from tqdm import tqdm
 from params import configs
 from utils.common_utils import setup_seed, strToSuffix
 from utils.data_utils import load_data_from_files, pack_data_from_config
-from env.fjsp_env import FJSPEnv
+from env.FJSPEnv import FJSPEnv
 from model.ppo import PPO_initialize
 
 os.environ["CUDA_VISIBLE_DEVICES"] = configs.device_id

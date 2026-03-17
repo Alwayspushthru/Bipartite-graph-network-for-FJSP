@@ -191,17 +191,14 @@ class FJSPEnv:
         """
         active_idx = np.where(~self.env_done)[0]
 
-        chosen_job = actions // self.number_of_machines
-        chosen_mch = actions % self.number_of_machines
-
-        active_job = chosen_job[active_idx]
-        active_machine = chosen_mch[active_idx]
+        active_job = actions // self.number_of_machines
+        active_machine = actions % self.number_of_machines
         chosen_op = self.candidate[active_idx, active_job]
 
         # 合法性检查
         if (self.reverse_process_relation[active_idx, chosen_op, active_machine]).any():
             print(
-                f'FJSP_Env.py Error from choosing action: Op {chosen_op} can\'t be processed by Mch {chosen_mch}')
+                f'FJSP_Env.py Error from choosing action: Op {chosen_op} can\'t be processed by Mch {active_machine}')
             sys.exit()
 
         # 候选工序推进

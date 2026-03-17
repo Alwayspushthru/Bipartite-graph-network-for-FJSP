@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import random
 from torch.distributions.categorical import Categorical
-from env.fjsp_env import EnvState
+from env.FJSPEnv import EnvState
 from typing import Dict
 
 def setup_seed(seed):
