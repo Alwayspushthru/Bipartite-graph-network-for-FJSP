@@ -77,13 +77,16 @@ class BiGraphNetwork(nn.Module):
         self.mes_dim = 128
 
         self.num_BiG_layers = config.num_bigraph_layers
-        self.BiG_layers = [BiGraphLayer(d = self.mes_dim) for _ in range(self.num_BiG_layers)]
+        self.BiG_layers = nn.ModuleList(
+            [BiGraphLayer(d=self.mes_dim) for _ in range(self.num_BiG_layers)]
+        )
 
         self.job_mlp = MLP(2, self.fea_j_input_dim, self.fea_embed_dim, self.mes_dim)
         self.mach_mlp = MLP(2, self.fea_m_input_dim, self.fea_embed_dim,self.mes_dim)
         self.pair_mlp = MLP(2, self.fea_pairs_input_dim, self.fea_embed_dim,self.mes_dim)
 
         self.linear_layer = nn.Linear(self.mes_dim, 8)
+        self.pair_linear = nn.Linear(self.fea_pairs_input_dim, 8)
 
         self.actor = Actor(config.num_mlp_layers_actor, 5 * 8,
             config.hidden_dim_actor,1,)
@@ -103,8 +106,7 @@ class BiGraphNetwork(nn.Module):
         _h_j = self.linear_layer(h_j)
         _h_m = self.linear_layer(h_m)
 
-        layer = nn.Linear(6,8)
-        _h_pair = layer(fea_pairs)
+        _h_pair = self.pair_linear(fea_pairs)
 
         h_j_global = self.nonzero_averaging(_h_j)
         h_m_global = self.nonzero_averaging(_h_m)
