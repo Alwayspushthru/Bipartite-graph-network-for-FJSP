@@ -23,49 +23,6 @@ else:
 
 ppo = PPO_initialize()
 
-def sample_action_from_logits(logits, dynamic_pair_mask):
-    valid_mask = ~dynamic_pair_mask.bool()
-    masked_logits = logits.masked_fill(~valid_mask, -1e9)
-    batch_size, num_jobs, num_machines = masked_logits.shape
-    flat_logits = masked_logits.view(batch_size, num_jobs * num_machines)
-    dist = torch.distributions.Categorical(logits=flat_logits)
-    action = dist.sample()
-    return action, dist.log_prob(action)
-
-def test_sampling_strategy(data_set, model_path, sample_times, seed):
-    setup_seed(seed)
-    test_result_list = []
-    ppo.policy.load_state_dict(torch.load(model_path, map_location='cuda', weights_only=True))
-    ppo.policy.eval()
-
-    env = FJSPEnv(device)
-
-    for i in tqdm(range(len(data_set[0])), file=sys.stdout, desc="progress", colour='blue'):
-        job_length_dataset = np.tile(np.expand_dims(data_set[0][i], axis=0), (sample_times, 1))
-        op_pt_dataset = np.tile(np.expand_dims(data_set[1][i], axis=0), (sample_times, 1, 1))
-
-        state = env.set_initial_data(job_length_dataset, op_pt_dataset)
-        t1 = time.time()
-        while True:
-            with torch.no_grad():
-                logits, _ = ppo.policy_old(
-                    state.fea_j_tensor,
-                    state.fea_m_tensor,
-                    state.fea_pairs_tensor,
-                    state.candidate_tensor,
-                    state.dynamic_pair_mask_tensor,
-                )
-            action_envs, _ = sample_action_from_logits(logits, state.dynamic_pair_mask_tensor)
-            state, _, done = env.step(action_envs.cpu().numpy())
-            if done.all():
-                break
-
-        t2 = time.time()
-        best_makespan = np.min(env.current_makespan)
-        test_result_list.append([best_makespan, t2 - t1])
-
-    return np.array(test_result_list)
-
 def test_greedy_strategy(data_set, model_path, seed):
     test_result_list = []
     setup_seed(seed)
@@ -95,7 +52,7 @@ def test_greedy_strategy(data_set, model_path, seed):
 
     return np.array(test_result_list)
 
-def main(config, flag_sample):
+def main(config):
     setup_seed(config.seed_test)
     if not os.path.exists('./test_results'):
         os.makedirs('./test_results')
@@ -109,11 +66,7 @@ def main(config, flag_sample):
 
     # collect the test data
     test_data = pack_data_from_config(config.data_source, config.test_data)
-
-    if not flag_sample:
-        model_prefix = "Bi2-G"
-    else:
-        model_prefix = "Bi-Graph_S"
+    model_prefix = "Bgnn-G"
 
     for data in test_data:
         print("-" * 25 + "Test Learned Model" + "-" * 25)
@@ -129,31 +82,21 @@ def main(config, flag_sample):
             if (not os.path.exists(save_path)) or config.cover_flag:
                 print(f"Model name : {model[1]}")
                 print(f"data name: ./data/{config.data_source}/{data[1]}")
+                print("Test mode: Greedy")
+                result_5_times = []
+                # Greedy mode, test 5 times, record average time.
+                for j in range(1):
+                    result = test_greedy_strategy(data[0], model[0], config.seed_test)
+                    result_5_times.append(result)
+                result_5_times = np.array(result_5_times)
 
-                if not flag_sample:
-                    print("Test mode: Greedy")
-                    result_5_times = []
-                    # Greedy mode, test 5 times, record average time.
-                    for j in range(1):
-                        result = test_greedy_strategy(data[0], model[0], config.seed_test)
-                        result_5_times.append(result)
-                    result_5_times = np.array(result_5_times)
-
-                    save_result = np.mean(result_5_times, axis=0)
-                    print("testing results:")
-                    print(f"makespan(greedy): ", save_result[:, 0].mean())
-                    print(f"time: ", save_result[:, 1].mean())
-
-                else:
-                    # Sample mode, test once.
-                    print("Test mode: Sample")
-                    save_result = test_sampling_strategy(data[0], model[0], config.sample_times, config.seed_test)
-                    print("testing results:")
-                    print(f"makespan(sampling): ", save_result[:, 0].mean())
-                    print(f"time: ", save_result[:, 1].mean())
+                save_result = np.mean(result_5_times, axis=0)
+                print("testing results:")
+                print(f"makespan(greedy): ", save_result[:, 0].mean())
+                print(f"time: ", save_result[:, 1].mean())
 
                 result_df = pd.DataFrame(save_result, columns=["makespan", "time"])
                 result_df.to_excel(save_path, index=False)
 
 if __name__ == "__main__":
-    main(configs, configs.test_mode)
+    main(configs)
