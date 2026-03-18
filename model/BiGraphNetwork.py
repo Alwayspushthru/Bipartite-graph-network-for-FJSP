@@ -24,8 +24,13 @@ class BiGraphLayer(nn.Module):
         self.Wg_mo = nn.Linear(d, d, bias=True)
         self.ln_m = nn.LayerNorm(d)
 
+        # P <- (O, M, P)
+        self.Wp = nn.Linear(3 * d, d, bias=True)
+        self.ln_p = nn.LayerNorm(d)
+
     def forward(self, h_j, h_m, h_pair, dynamic_pair_mask):
         B, J, d = h_j.shape
+        M = h_m.size(1)
 
         # ===================== O <- M =====================
         q = self.Wq_o(h_j).unsqueeze(2)  # [B,J,1,d]
@@ -62,7 +67,14 @@ class BiGraphLayer(nn.Module):
 
         h_m = self.ln_m(h_m + agg_m)
 
-        return h_j, h_m
+        # ===================== P <- (O, M, P) =====================
+        h_j_pair = h_j.unsqueeze(2).expand(-1, -1, M, -1)
+        h_m_pair = h_m.unsqueeze(1).expand(-1, J, -1, -1)
+        pair_input = torch.cat([h_j_pair, h_m_pair, h_pair], dim=-1)
+        pair_delta = torch.tanh(self.Wp(pair_input))
+        h_pair = self.ln_p(h_pair + pair_delta)
+
+        return h_j, h_m, h_pair
 
 
 class BiGraphNetwork(nn.Module):
@@ -85,8 +97,9 @@ class BiGraphNetwork(nn.Module):
         self.mach_mlp = MLP(2, self.fea_m_input_dim, self.fea_embed_dim,self.mes_dim)
         self.pair_mlp = MLP(2, self.fea_pairs_input_dim, self.fea_embed_dim,self.mes_dim)
 
-        self.linear_layer = nn.Linear(self.mes_dim, 8)
-        self.pair_linear = nn.Linear(self.fea_pairs_input_dim, 8)
+        self.job_out = nn.Linear(self.mes_dim, 8)
+        self.mach_out = nn.Linear(self.mes_dim, 8)
+        self.pair_out = nn.Linear(self.mes_dim, 8)
 
         self.actor = Actor(config.num_mlp_layers_actor, 5 * 8,
             config.hidden_dim_actor,1,)
@@ -101,12 +114,11 @@ class BiGraphNetwork(nn.Module):
         h_pair = self.pair_mlp(fea_pairs) # 6 →  →
 
         for layer in self.BiG_layers:
-                h_j, h_m = layer(h_j, h_m, h_pair, dynamic_pair_mask)
+                h_j, h_m, h_pair = layer(h_j, h_m, h_pair, dynamic_pair_mask)
 
-        _h_j = self.linear_layer(h_j)
-        _h_m = self.linear_layer(h_m)
-
-        _h_pair = self.pair_linear(fea_pairs)
+        _h_j = self.job_out(h_j)
+        _h_m = self.mach_out(h_m)
+        _h_pair = self.pair_out(h_pair)
 
         h_j_global = self.nonzero_averaging(_h_j)
         h_m_global = self.nonzero_averaging(_h_m)
