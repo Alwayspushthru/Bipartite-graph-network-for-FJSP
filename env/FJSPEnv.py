@@ -328,7 +328,7 @@ class FJSPEnv:
         """
             [1] feasible_ops_norm: 所有可加工操作数 / 所有还存在的工件数
             [2] mach_ready: 机器的空闲时间
-            [3] workload: 机器总负载
+            [3] workload: 所有未调度操作在该机器上的潜在负载之和
             [4] idle: 空闲时间累计
         :return:fea_m[B,M,4]
         """
@@ -336,7 +336,19 @@ class FJSPEnv:
         num_alive = np.sum(~self.mask, axis=1, keepdims=True)
         feasible_ops_norm = feasible_ops / (num_alive + 1e-8)
         mach_ready = self.mch_free_time
-        workload = self.mch_cum_load
+        
+        unscheduled_op_mask = np.zeros((self.number_of_envs, self.number_of_ops), dtype=bool)
+        for env_idx in range(self.number_of_envs):
+            for job_idx in range(self.number_of_jobs):
+                if self.mask[env_idx, job_idx]:
+                    continue
+                start = self.candidate[env_idx, job_idx]
+                end = self.job_last_op_id[env_idx, job_idx] + 1
+                unscheduled_op_mask[env_idx, start:end] = True
+        workload = np.sum(
+            self.unmasked_op_pt * unscheduled_op_mask[:, :, None],
+            axis=1
+        )
         idle = self.idle_acc
         self.fea_m = np.stack((feasible_ops_norm, mach_ready, workload, idle), axis=2)
 
