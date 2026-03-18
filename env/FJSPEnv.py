@@ -175,7 +175,8 @@ class FJSPEnv:
 
         self.candidate = np.copy(self.job_first_op_id)
 
-        self.mch_cum_load = np.zeros((self.number_of_envs, self.number_of_machines)) #机器m到目前为止被分配过的总加工时间之和
+        self.unscheduled_op_mask = np.zeros((self.number_of_envs, self.number_of_ops), dtype=bool)
+        self.unscheduled_op_mask[self.op_valid_mask] = True
         self.idle_acc = np.zeros((self.number_of_envs, self.number_of_machines))  # 机器m的空闲时间累计
 
         # mask[i,j] : whether the jth job of ith env is scheduled (have no unscheduled operations)
@@ -221,7 +222,7 @@ class FJSPEnv:
         chosen_op_pt = self.unmasked_op_pt[active_idx, chosen_op, active_machine]
         self.op_ct[active_idx, chosen_op] = chosen_op_st + chosen_op_pt
 
-        self.mch_cum_load[active_idx, active_machine] += chosen_op_pt
+        self.unscheduled_op_mask[active_idx, chosen_op] = False
 
         idle_inc = np.maximum(0.0, chosen_op_st - self.mch_free_time[active_idx, active_machine])
         self.idle_acc[active_idx, active_machine] += idle_inc
@@ -328,7 +329,7 @@ class FJSPEnv:
         """
             [1] feasible_ops_norm: 所有可加工操作数 / 所有还存在的工件数
             [2] mach_ready: 机器的空闲时间
-            [3] workload: 所有未调度操作在该机器上的潜在负载之和
+            [3] expect_workload: 按责任权重分摊后的机器潜在负载
             [4] idle: 空闲时间累计
         :return:fea_m[B,M,4]
         """
@@ -336,21 +337,15 @@ class FJSPEnv:
         num_alive = np.sum(~self.mask, axis=1, keepdims=True)
         feasible_ops_norm = feasible_ops / (num_alive + 1e-8)
         mach_ready = self.mch_free_time
+
+        unscheduled_relation = self.process_relation & self.unscheduled_op_mask[:, :, None]
+        # 还未调度的工序中可加工的部分(B,O,M)
+        n_compatible = np.sum(unscheduled_relation, axis=2, keepdims=True)  # (B,O,1)
+        uniform_resp = np.where(unscheduled_relation, 1.0 / (n_compatible + 1e-8), 0.0)
+        expect_workload = np.sum(uniform_resp * self.true_op_pt, axis=1)
         
-        unscheduled_op_mask = np.zeros((self.number_of_envs, self.number_of_ops), dtype=bool)
-        for env_idx in range(self.number_of_envs):
-            for job_idx in range(self.number_of_jobs):
-                if self.mask[env_idx, job_idx]:
-                    continue
-                start = self.candidate[env_idx, job_idx]
-                end = self.job_last_op_id[env_idx, job_idx] + 1
-                unscheduled_op_mask[env_idx, start:end] = True
-        workload = np.sum(
-            self.unmasked_op_pt * unscheduled_op_mask[:, :, None],
-            axis=1
-        )
         idle = self.idle_acc
-        self.fea_m = np.stack((feasible_ops_norm, mach_ready, workload, idle), axis=2)
+        self.fea_m = np.stack((feasible_ops_norm, mach_ready, expect_workload, idle), axis=2)
 
         # 没有删除节点的normalize
         mean_fea_m = np.sum(self.fea_m, axis=1) / self.number_of_machines
