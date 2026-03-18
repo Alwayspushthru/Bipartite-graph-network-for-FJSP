@@ -35,7 +35,7 @@ class FJSPEnv:
         self.old_state = EnvState()
 
         # the dimension of operation raw features
-        self.op_fea_dim = 6
+        self.op_fea_dim = 7
         # the dimension of machine raw features
         self.mch_fea_dim = 4
         # the dimension of edge raw features
@@ -282,7 +282,8 @@ class FJSPEnv:
             [4] rem_work : 工件剩余工作量(未调度操作的平均加工时间之和)
             [5] p_mean : 平均加工时间
             [6] p_span : 加工时间跨度
-        :return: fea_j[B,J,6] 若其中有工件已完工那么用mask将对应特征置为0
+            [7] job_ct_lb : 工件最后一道工序的完工时间下界
+        :return: fea_j[B,J,7] 若其中有工件已完工那么用mask将对应特征置为0
         """
         feasible_mas = self.compatible_op[self.env_idxs[:, None], self.candidate] # 操作能被多少台机器加工
         feasible_mas_ratio = feasible_mas / self.number_of_machines
@@ -301,8 +302,12 @@ class FJSPEnv:
 
         p_mean = self.op_mean_pt[self.env_idxs[:, None], self.candidate]
         p_span = self.pt_span[self.env_idxs[:, None], self.candidate]
+        job_ct_lb = self.op_ct_lb[self.env_idxs[:, None], self.job_last_op_id]
 
-        self.fea_j = np.stack((feasible_mas_ratio,job_ready,rem_ops, rem_work, p_mean,p_span),axis=2,)
+        self.fea_j = np.stack(
+            (feasible_mas_ratio, job_ready, rem_ops, rem_work, p_mean, p_span, job_ct_lb),
+            axis=2,
+        )
 
         mask = self.mask[:,:,None]
         self.fea_j = np.where(mask, 0, self.fea_j)
@@ -312,7 +317,7 @@ class FJSPEnv:
         valid_env = (num_left_nodes.squeeze(-1) > 0)               # [B]
 
         if valid_env.any():
-            fea_j_valid = self.fea_j[valid_env]  # [Bv, J, 6]
+            fea_j_valid = self.fea_j[valid_env]  # [Bv, J, 7]
             mask_valid = mask[valid_env]         # [Bv, J, 1]
             num_left_valid = num_left_nodes[valid_env]  # [Bv, 1]
 

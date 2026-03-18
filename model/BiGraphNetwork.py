@@ -69,7 +69,7 @@ class BiGraphNetwork(nn.Module):
     def __init__(self, config):
         super(BiGraphNetwork, self).__init__()
 
-        self.fea_j_input_dim = config.fea_j_input_dim  # 6
+        self.fea_j_input_dim = config.fea_j_input_dim  # 7
         self.fea_m_input_dim = config.fea_m_input_dim  # 4
         self.fea_pairs_input_dim = config.fea_pair_input_dim  # 6
 
@@ -96,7 +96,7 @@ class BiGraphNetwork(nn.Module):
     def forward(self, fea_j, fea_m, fea_pairs, dynamic_pair_mask):
         B,J,M = dynamic_pair_mask.shape
 
-        h_j = self.job_mlp(fea_j) # 6 →  →
+        h_j = self.job_mlp(fea_j) # 7 →  →
         h_m = self.mach_mlp(fea_m) # 4 →  →
         h_pair = self.pair_mlp(fea_pairs) # 6 →  →
 
