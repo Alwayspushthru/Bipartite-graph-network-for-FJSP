@@ -73,11 +73,9 @@ parser.add_argument('--log_interval', type=int, default=10, help='Interval (upda
 parser.add_argument('--use_tensorboard', type=str2bool, default=True, help='Whether to enable TensorBoard logging')
 
 # args for test
-parser.add_argument('--test_data', nargs='+', default=['Brandimarte'], help='List of data for testing')
-parser.add_argument('--test_mode', type=str2bool, default = False, help='Whether using the sampling strategy in testing')
-parser.add_argument('--sample_times', type=int, default=100, help='Sampling times for the sampling strategy')
+parser.add_argument('--test_data', nargs='+', default=['10x5'], help='List of data for testing')
 parser.add_argument('--test_model', nargs='+', default=['10x5'], help='List of model for testing')
-parser.add_argument('--test_method', nargs='+', default=[], help='List of heuristic methods for testing')
+parser.add_argument('--test_path', type=str, default='net1')
 
 # args for testData to excel
 parser.add_argument('--sort_flag', type=str2bool, default=True,

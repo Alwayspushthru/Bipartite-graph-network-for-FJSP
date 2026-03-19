@@ -59,10 +59,11 @@ def main(config):
 
     # collect the path of test models
     test_model = []
+    model_path = config.test_path
 
     for model_name in config.test_model:
         # test_model.append((f'./trained_network/{config.model_source}/{model_name}.pth', model_name))
-        test_model.append((f'./trained_network/{model_name}.pth', model_name))
+        test_model.append((f'./trained_network/{model_path}/{model_name}.pth', model_name))
 
     # collect the test data
     test_data = pack_data_from_config(config.data_source, config.test_data)
@@ -77,7 +78,7 @@ def main(config):
             os.makedirs(save_direc)
 
         for model in test_model:
-            save_path = save_direc + f'/{model_prefix}+{model[1]}_{data[1]}.xlsx'
+            save_path = save_direc + f'/{model[1]}.xlsx'
 
             if (not os.path.exists(save_path)) or config.cover_flag:
                 print(f"Model name : {model[1]}")
