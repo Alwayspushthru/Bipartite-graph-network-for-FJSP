@@ -81,8 +81,8 @@ class BiGraphNetwork(nn.Module):
     def __init__(self, config):
         super(BiGraphNetwork, self).__init__()
 
-        self.fea_j_input_dim = config.fea_j_input_dim  # 6
-        self.fea_m_input_dim = config.fea_m_input_dim  # 4
+        self.fea_j_input_dim = config.fea_j_input_dim  # 7
+        self.fea_m_input_dim = config.fea_m_input_dim  # 5
         self.fea_pairs_input_dim = config.fea_pair_input_dim  # 6
 
         self.fea_embed_dim = 128
@@ -94,85 +94,122 @@ class BiGraphNetwork(nn.Module):
         )
 
         self.job_mlp = MLP(2, self.fea_j_input_dim, self.fea_embed_dim, self.mes_dim)
-        self.mach_mlp = MLP(2, self.fea_m_input_dim, self.fea_embed_dim,self.mes_dim)
-        self.pair_mlp = MLP(2, self.fea_pairs_input_dim, self.fea_embed_dim,self.mes_dim)
+        self.mach_mlp = MLP(2, self.fea_m_input_dim, self.fea_embed_dim, self.mes_dim)
+        self.pair_mlp = MLP(2, self.fea_pairs_input_dim, self.fea_embed_dim, self.mes_dim)
 
         self.job_out = nn.Linear(self.mes_dim, 8)
         self.mach_out = nn.Linear(self.mes_dim, 8)
         self.pair_out = nn.Linear(self.mes_dim, 8)
 
-        self.actor = Actor(config.num_mlp_layers_actor, 5 * 8,
-            config.hidden_dim_actor,1,)
-        self.critic = Critic(config.num_mlp_layers_critic, 3 * 8,
-            config.hidden_dim_critic,1,)
+        self.hist_dim = 32
+        self.gru_cell = nn.GRUCell(3 * 8, self.hist_dim)
 
-    def forward(self, fea_j, fea_m, fea_pairs, dynamic_pair_mask):
-        B,J,M = dynamic_pair_mask.shape
+        # Actor: 5 local/global embeddings (each 8-dim) + h_hist
+        self.actor = Actor(config.num_mlp_layers_actor, 5 * 8 + self.hist_dim,
+            config.hidden_dim_actor, 1)
+        # Critic: global graph summary + h_hist
+        self.critic = Critic(config.num_mlp_layers_critic, 3 * 8 + self.hist_dim,
+            config.hidden_dim_critic, 1)
 
-        h_j = self.job_mlp(fea_j) # 6 →  →
-        h_m = self.mach_mlp(fea_m) # 4 →  →
-        h_pair = self.pair_mlp(fea_pairs) # 6 →  →
+    def forward(self, fea_j, fea_m, fea_pairs, dynamic_pair_mask, h_hist=None):
+        """Single-step forward pass. Used during rollout and inference."""
+        B, J, M = dynamic_pair_mask.shape
+
+        h_j = self.job_mlp(fea_j)
+        h_m = self.mach_mlp(fea_m)
+        h_pair = self.pair_mlp(fea_pairs)
 
         for layer in self.BiG_layers:
-                h_j, h_m, h_pair = layer(h_j, h_m, h_pair, dynamic_pair_mask)
+            h_j, h_m, h_pair = layer(h_j, h_m, h_pair, dynamic_pair_mask)
 
         _h_j = self.job_out(h_j)
         _h_m = self.mach_out(h_m)
         _h_pair = self.pair_out(h_pair)
 
-        active_job_mask = ~dynamic_pair_mask.all(dim=-1)   # [B,J] True=active
-        active_mach_mask = ~dynamic_pair_mask.all(dim=1)   # [B,M] True=active
+        active_job_mask = ~dynamic_pair_mask.all(dim=-1)   # [B,J]
+        active_mach_mask = ~dynamic_pair_mask.all(dim=1)   # [B,M]
         h_j_global = self.nonzero_averaging(_h_j, active_job_mask)
         h_m_global = self.nonzero_averaging(_h_m, active_mach_mask)
 
-        h_j_pair = _h_j.unsqueeze(2).expand(-1, -1, M, -1)  # (B,J,M,8)
-        h_m_pair = _h_m.unsqueeze(1).expand(-1, J, -1, -1)  # (B,J,M,8)
-        h_j_global_pair = h_j_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)  # (B,J,M,8)
-        h_m_global_pair = h_m_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)  # (B,J,M,8)
+        mask = ~dynamic_pair_mask
+        h_pair_sum = (_h_pair * mask.unsqueeze(-1)).sum(dim=(1, 2))
+        num_valid = mask.sum(dim=(1, 2)).clamp_min(1).unsqueeze(-1)
+        h_pair_global = h_pair_sum / num_valid  # [B, 8]
 
-        h_j_flat = h_j_pair.reshape(B, J * M, 8)
-        h_m_flat = h_m_pair.reshape(B, J * M, 8)
-        h_j_global_flat = h_j_global_pair.reshape(B, J * M, 8)
-        h_m_global_flat = h_m_global_pair.reshape(B, J * M, 8)
-        h_pair_flat = _h_pair.reshape(B, J * M, 8)
+        h_graph = torch.cat([h_j_global, h_m_global, h_pair_global], dim=-1)  # [B, 24]
 
-        candidate_feature = torch.cat([h_j_flat, h_m_flat, h_j_global_flat,h_m_global_flat, h_pair_flat], dim=-1)
+        # GRU: compress trajectory into h_hist
+        if h_hist is None:
+            h_hist = torch.zeros(B, self.hist_dim, device=fea_j.device)
+        h_hist_new = self.gru_cell(h_graph, h_hist)
+
+        # Actor: per-(job, machine) pair features + h_hist broadcast
+        h_j_pair = _h_j.unsqueeze(2).expand(-1, -1, M, -1)
+        h_m_pair = _h_m.unsqueeze(1).expand(-1, J, -1, -1)
+        h_j_global_pair = h_j_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
+        h_m_global_pair = h_m_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
+        h_hist_pair = h_hist_new.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
+
+        candidate_feature = torch.cat([
+            h_j_pair.reshape(B, J * M, 8),
+            h_m_pair.reshape(B, J * M, 8),
+            h_j_global_pair.reshape(B, J * M, 8),
+            h_m_global_pair.reshape(B, J * M, 8),
+            _h_pair.reshape(B, J * M, 8),
+            h_hist_pair.reshape(B, J * M, self.hist_dim),
+        ], dim=-1)  # [B, J*M, 5*8 + hist_dim]
+
         logits = self.actor(candidate_feature).squeeze(-1)
-
         logits[dynamic_pair_mask.reshape(B, -1)] = float('-inf')
         pi = F.softmax(logits, dim=1)
 
-        mask = ~dynamic_pair_mask
-        mask = mask.unsqueeze(-1)
-        h_pair_sum = (_h_pair * mask).sum(dim=(1,2))
-        num_valid = mask.sum(dim=(1, 2)).clamp_min(1)  # (B,1)
-        h_pair_global = h_pair_sum / num_valid  # (B,8)
+        value = self.critic(torch.cat([h_graph, h_hist_new], dim=-1)).squeeze(-1)
 
-        h_graph = torch.cat([h_j_global,h_m_global,h_pair_global], dim=-1)
-        value = self.critic(h_graph).squeeze(-1)
+        return pi, value, h_hist_new
 
-        return pi, value
+    def forward_sequence(self, fea_j_seq, fea_m_seq, fea_pairs_seq, mask_seq, h0, done_seq=None):
+        """
+        Full-sequence forward with BPTT through the GRU.
+        Used in PPO update to recompute pi/value under current policy parameters.
 
-    def act(self, fea_j, fea_m, fea_pairs, candidate, dynamic_pair_mask):
-        pi, value = self.forward(fea_j, fea_m, fea_pairs, dynamic_pair_mask)
+        Args:
+            fea_j_seq:     [T, B, J, Fj]
+            fea_m_seq:     [T, B, M, Fm]
+            fea_pairs_seq: [T, B, J, M, Fp]
+            mask_seq:      [T, B, J, M]  dynamic_pair_mask
+            h0:            [B, hist_dim]  initial hidden (zeros at episode start)
+            done_seq:      [T, B] bool, done flag after each step
+
+        Returns:
+            pi_seq:    [T, B, J*M]
+            value_seq: [T, B]
+            h_last:    [B, hist_dim]
+        """
+        T = fea_j_seq.size(0)
+        h = h0
+        pi_list, value_list = [], []
+
+        for t in range(T):
+            pi_t, value_t, h = self.forward(
+                fea_j_seq[t], fea_m_seq[t], fea_pairs_seq[t], mask_seq[t], h
+            )
+            pi_list.append(pi_t)
+            value_list.append(value_t)
+
+            # Reset hidden for envs that finished this step
+            if done_seq is not None:
+                h = h * (~done_seq[t]).float().unsqueeze(-1)
+
+        return torch.stack(pi_list, dim=0), torch.stack(value_list, dim=0), h
+
+    def act(self, fea_j, fea_m, fea_pairs, candidate, dynamic_pair_mask, h_hist=None):
+        pi, value, h_hist_new = self.forward(fea_j, fea_m, fea_pairs, dynamic_pair_mask, h_hist)
         dist = Categorical(pi)
-
-        action = dist.sample() # 采样动作
-        log_prob = dist.log_prob(action) #计算对数概率
-
-        return action, log_prob, value
-
-    def evaluate_actions(self, fea_j, fea_m, fea_pairs, candidate, dynamic_pair_mask, action):
-        pi, value = self.forward(fea_j, fea_m, fea_pairs, dynamic_pair_mask)
-
-        dist = Categorical(pi)
-
+        action = dist.sample()
         log_prob = dist.log_prob(action)
-        entropy = dist.entropy()
-        return log_prob, entropy, value
+        return action, log_prob, value, h_hist_new
 
     def nonzero_averaging(self, x, mask):
-        # x: [B,N,d], mask: [B,N] True=active
-        mask_f = mask.unsqueeze(-1).float()          # [B,N,1]
-        count = mask_f.sum(dim=1).clamp_min(1)       # [B,1]
-        return (x * mask_f).sum(dim=1) / count       # [B,d]
+        mask_f = mask.unsqueeze(-1).float()
+        count = mask_f.sum(dim=1).clamp_min(1)
+        return (x * mask_f).sum(dim=1) / count

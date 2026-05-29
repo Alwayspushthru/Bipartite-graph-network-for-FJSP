@@ -1,45 +1,28 @@
-import torch.nn as nn
 import torch
+import torch.nn as nn
 from copy import deepcopy
 
 from model.BiGraphNetwork import BiGraphNetwork
 from params import configs
-import numpy as np
+
 
 class Memory:
     def __init__(self, gamma, gae_lambda):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
-        # input variables
-        self.fea_j_seq = []  # [N, tensor[sz_b, N, 6]]
-        self.fea_m_seq = []  # [N, tensor[sz_b, M, 3]]
-        self.fea_pairs_seq = []  # [N, tensor[sz_b, J]]
-        self.candidate_seq = []  # [N, tensor[sz_b, J]]
-        self.job_mask_seq = []  # [N, tensor[sz_b, J]]
-        self.dynamic_pair_mask_seq = []  # [N, tensor[sz_b, J, M]]
-
-        # other variables
-        self.action_seq = []  # action index with shape [N, tensor[sz_b]]
-        self.reward_seq = []  # reward value with shape [N, tensor[sz_b]]
-        self.val_seq = []  # state value with shape [N, tensor[sz_b]]
-        self.done_seq = []  # done flag with shape [N, tensor[sz_b]]
-        self.log_probs = []  # log(p_{\theta_old}(a_t|s_t)) with shape [N, tensor[sz_b]]
-
-    def clear_memory(self):
-        self.clear_state()
-        del self.action_seq[:]
-        del self.reward_seq[:]
-        del self.val_seq[:]
-        del self.done_seq[:]
-        del self.log_probs[:]
-
-    def clear_state(self):
-        del self.fea_j_seq[:]
-        del self.fea_m_seq[:]
-        del self.fea_pairs_seq[:]
-        del self.candidate_seq[:]
-        del self.job_mask_seq[:]
-        del self.dynamic_pair_mask_seq[:]
+        # state sequences — each element is [B, ...]
+        self.fea_j_seq = []
+        self.fea_m_seq = []
+        self.fea_pairs_seq = []
+        self.candidate_seq = []
+        self.job_mask_seq = []
+        self.dynamic_pair_mask_seq = []
+        # transition sequences
+        self.action_seq = []
+        self.reward_seq = []
+        self.val_seq = []
+        self.done_seq = []
+        self.log_probs = []
 
     def push(self, state):
         self.fea_j_seq.append(state.fea_j_tensor)
@@ -49,144 +32,144 @@ class Memory:
         self.job_mask_seq.append(state.job_mask_tensor)
         self.dynamic_pair_mask_seq.append(state.dynamic_pair_mask_tensor)
 
-    def transpose_data(self):
+    def clear_memory(self):
+        del self.fea_j_seq[:]
+        del self.fea_m_seq[:]
+        del self.fea_pairs_seq[:]
+        del self.candidate_seq[:]
+        del self.job_mask_seq[:]
+        del self.dynamic_pair_mask_seq[:]
+        del self.action_seq[:]
+        del self.reward_seq[:]
+        del self.val_seq[:]
+        del self.done_seq[:]
+        del self.log_probs[:]
+
+    def get_sequence_data(self):
         """
-            transpose the first and second dimension of collected variables
+        Stack all collected tensors into [T, B, ...] without flattening.
+        Returns tensors suitable for forward_sequence.
         """
-        t_Fea_j_seq = torch.stack(self.fea_j_seq, dim=0).transpose(0, 1).flatten(0, 1)
-        t_Fea_m_seq = torch.stack(self.fea_m_seq, dim=0).transpose(0, 1).flatten(0, 1)
-        t_pairMessage_seq = torch.stack(self.fea_pairs_seq, dim=0).transpose(0, 1).flatten(0, 1)
-        t_candidate_seq = torch.stack(self.candidate_seq, dim=0).transpose(0, 1).flatten(0, 1)
-        t_job_mask_seq = torch.stack(self.job_mask_seq, dim=0).transpose(0, 1).flatten(0, 1)
-        t_dynamicMask_seq = torch.stack(self.dynamic_pair_mask_seq, dim=0).transpose(0, 1).flatten(0, 1)
-
-        t_action_seq = torch.stack(self.action_seq, dim=0).transpose(0, 1).flatten(0, 1)
-        t_reward_seq = torch.stack(self.reward_seq, dim=0).transpose(0, 1).flatten(0, 1)
-
-        self.t_old_val_seq = torch.stack(self.val_seq, dim=0).transpose(0, 1)
-        t_val_seq = self.t_old_val_seq.flatten(0, 1)
-        t_done_seq = torch.stack(self.done_seq, dim=0).transpose(0, 1).flatten(0, 1)
-        t_logprobs_seq = torch.stack(self.log_probs, dim=0).transpose(0, 1).flatten(0, 1)
-
-        return (t_Fea_j_seq, t_Fea_m_seq, t_pairMessage_seq,
-                t_candidate_seq, t_job_mask_seq, t_dynamicMask_seq,
-                t_action_seq, t_reward_seq, t_val_seq, t_done_seq, t_logprobs_seq)
+        fea_j    = torch.stack(self.fea_j_seq, dim=0)             # [T, B, J, Fj]
+        fea_m    = torch.stack(self.fea_m_seq, dim=0)             # [T, B, M, Fm]
+        fea_pairs = torch.stack(self.fea_pairs_seq, dim=0)        # [T, B, J, M, Fp]
+        mask     = torch.stack(self.dynamic_pair_mask_seq, dim=0) # [T, B, J, M]
+        action   = torch.stack(self.action_seq, dim=0)            # [T, B]
+        reward   = torch.stack(self.reward_seq, dim=0)            # [T, B]
+        old_val  = torch.stack(self.val_seq, dim=0)               # [T, B]
+        done     = torch.stack(self.done_seq, dim=0)              # [T, B]
+        old_logp = torch.stack(self.log_probs, dim=0)             # [T, B]
+        return fea_j, fea_m, fea_pairs, mask, action, reward, old_val, done, old_logp
 
     def get_gae_advantages(self):
-        reward_arr = torch.stack(self.reward_seq, dim=0)
-        values = torch.stack(self.val_seq, dim=0)
+        """
+        Compute GAE advantages with done masking.
+        Normalizes per-env (over T) to match original behaviour.
+        """
+        reward_arr = torch.stack(self.reward_seq, dim=0)  # [T, B]
+        values     = torch.stack(self.val_seq,    dim=0)  # [T, B]
+        done_arr   = torch.stack(self.done_seq,   dim=0)  # [T, B]
 
-        len_trajectory, len_envs = reward_arr.shape
-
-        advantage = torch.zeros(len_envs, device=values.device)
+        T, B = reward_arr.shape
+        advantage = torch.zeros(B, device=values.device)
         advantage_seq = []
-        for i in reversed(range(len_trajectory)):
-            if i == len_trajectory - 1:
-                delta_t = reward_arr[i] - values[i]
+
+        for i in reversed(range(T)):
+            not_done = (~done_arr[i]).float()  # [B]
+            if i == T - 1:
+                # Terminal step: no bootstrap
+                delta = reward_arr[i] - values[i]
             else:
-                delta_t = reward_arr[i] + self.gamma * values[i + 1] - values[i]
-            advantage = delta_t + self.gamma * self.gae_lambda * advantage
+                delta = reward_arr[i] + self.gamma * values[i + 1] * not_done - values[i]
+            advantage = delta + self.gamma * self.gae_lambda * not_done * advantage
             advantage_seq.insert(0, advantage)
 
-        # [sz_b, N]
-        t_advantage_seq = torch.stack(advantage_seq, dim=0).transpose(0, 1).to(torch.float32)
+        t_adv = torch.stack(advantage_seq, dim=0)  # [T, B]
+        v_target = t_adv + values                  # [T, B]
 
-        # [sz_b, N]
-        v_target_seq = (t_advantage_seq + self.t_old_val_seq).flatten(0, 1)
+        # Normalize per-env (over T dimension)
+        t_adv = (t_adv - t_adv.mean(dim=0, keepdim=True)) / \
+                (t_adv.std(dim=0, keepdim=True) + 1e-8)
 
-        # normalization
-        t_advantage_seq = (t_advantage_seq - t_advantage_seq.mean(dim=1, keepdim=True)) \
-                          / (t_advantage_seq.std(dim=1, keepdim=True) + 1e-8)
+        return t_adv, v_target
 
-        return t_advantage_seq.flatten(0, 1), v_target_seq
 
 class PPO:
     def __init__(self, config):
-        self.lr = config.lr
-        self.gamma = config.gamma
-        self.gae_lambda = config.gae_lambda
-        self.eps_clip = config.eps_clip
-        self.k_epochs = config.k_epochs
-        self.tau = config.tau
+        self.lr          = config.lr
+        self.gamma       = config.gamma
+        self.gae_lambda  = config.gae_lambda
+        self.eps_clip    = config.eps_clip
+        self.k_epochs    = config.k_epochs
+        self.tau         = config.tau
 
-        self.ploss_coef = config.ploss_coef
-        self.vloss_coef = config.vloss_coef
+        self.ploss_coef  = config.ploss_coef
+        self.vloss_coef  = config.vloss_coef
         self.entloss_coef = config.entloss_coef
-        self.minibatch_size = config.minibatch_size
 
-        self.policy = BiGraphNetwork(config)
+        self.policy     = BiGraphNetwork(config)
         self.policy_old = deepcopy(self.policy)
-
         self.policy_old.load_state_dict(self.policy.state_dict())
 
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
-        self.V_loss_2 = nn.MSELoss()
-        self.device = torch.device(config.device)
+        self.V_loss_2  = nn.MSELoss()
 
     def update(self, memory):
-        '''
-        :param memory: data used for PPO training
-        :return: total_loss and critic_loss
-        '''
+        (fea_j_seq, fea_m_seq, fea_pairs_seq, mask_seq,
+         action_seq, reward_seq, old_val_seq, done_seq, old_logp_seq) = memory.get_sequence_data()
 
-        t_data = memory.transpose_data()
-        t_advantage_seq, v_target_seq = memory.get_gae_advantages()
+        t_adv, v_target = memory.get_gae_advantages()
 
-        (t_Fea_j_seq, t_Fea_m_seq, t_pairMessage_seq,
-         t_candidate_seq, t_job_mask_seq, t_dynamicMask_seq,
-         t_action_seq, t_reward_seq, t_val_seq, t_done_seq, t_logprobs_seq) = t_data
+        T, B = action_seq.shape
 
-        num_samples = t_action_seq.size(0)
-        total_loss = 0.0 # policy,value,ent
+        total_loss = 0.0
         value_loss = 0.0
         policy_loss_total = 0.0
         entropy_total = 0.0
-        num_batches = 0 # 总步数
 
         for _ in range(self.k_epochs):
-            for start in range(0, num_samples, self.minibatch_size):
-                end = start + self.minibatch_size
-                batch_slice = slice(start, end)
+            h0 = torch.zeros(B, self.policy.hist_dim, device=fea_j_seq.device)
 
-                logp_new, entropy, value_new = self.policy.evaluate_actions(
-                    t_Fea_j_seq[batch_slice],
-                    t_Fea_m_seq[batch_slice],
-                    t_pairMessage_seq[batch_slice],
-                    t_candidate_seq[batch_slice],
-                    t_dynamicMask_seq[batch_slice],
-                    t_action_seq[batch_slice],
-                )
+            # Recompute full sequence with current policy parameters (true BPTT)
+            pi_seq, value_seq, _ = self.policy.forward_sequence(
+                fea_j_seq, fea_m_seq, fea_pairs_seq, mask_seq, h0, done_seq
+            )  # [T, B, J*M], [T, B]
 
-                ratio = torch.exp(logp_new - t_logprobs_seq[batch_slice].detach())
-                surr1 = ratio * t_advantage_seq[batch_slice]
-                surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * t_advantage_seq[batch_slice]
+            dist    = torch.distributions.Categorical(pi_seq)
+            logp_new = dist.log_prob(action_seq)  # [T, B]
+            entropy  = dist.entropy()             # [T, B]
 
-                policy_loss = -torch.min(surr1, surr2)
-                critic_loss = self.V_loss_2(value_new, v_target_seq[batch_slice])
-                entropy_loss = -entropy
+            ratio = torch.exp(logp_new - old_logp_seq.detach())
+            surr1 = ratio * t_adv
+            surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * t_adv
 
-                loss =  self.ploss_coef * policy_loss + self.vloss_coef * critic_loss + self.entloss_coef * entropy_loss
-                self.optimizer.zero_grad()
+            policy_loss  = -torch.min(surr1, surr2)
+            critic_loss  = self.V_loss_2(value_seq, v_target.detach())
+            entropy_loss = -entropy
 
-                total_loss += loss.mean().detach()
-                value_loss += critic_loss.mean().detach()
-                policy_loss_total += policy_loss.mean().detach()
-                entropy_total += entropy_loss.mean().detach()
-                num_batches += 1
+            loss = (self.ploss_coef  * policy_loss
+                  + self.vloss_coef  * critic_loss
+                  + self.entloss_coef * entropy_loss)
 
-                loss.mean().backward()
-                self.optimizer.step()
+            self.optimizer.zero_grad()
+            loss.mean().backward()
+            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+            self.optimizer.step()
+
+            total_loss       += loss.mean().detach()
+            value_loss       += critic_loss.mean().detach()
+            policy_loss_total += policy_loss.mean().detach()
+            entropy_total    += entropy_loss.mean().detach()
 
         self.policy_old.load_state_dict(self.policy.state_dict())
 
         return {
-            "total_loss": (total_loss.item() / num_batches),
-            "value_loss": (value_loss.item() / num_batches),
-            "policy_loss": (policy_loss_total.item() / num_batches),
-            "entropy": (entropy_total.item() / num_batches),
+            "total_loss":   total_loss.item()        / self.k_epochs,
+            "value_loss":   value_loss.item()        / self.k_epochs,
+            "policy_loss":  policy_loss_total.item() / self.k_epochs,
+            "entropy":      entropy_total.item()     / self.k_epochs,
         }
 
 
 def PPO_initialize():
-    ppo = PPO(config=configs)
-    return ppo
+    return PPO(config=configs)

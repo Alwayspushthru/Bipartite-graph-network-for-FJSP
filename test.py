@@ -49,14 +49,16 @@ def test_greedy_strategy(data_set, model_path, seed):
 
     for i in tqdm(range(len(data_set[0])), file=sys.stdout, desc="progress", colour='blue'):
         state = env.set_initial_data([data_set[0][i]], [data_set[1][i]])
+        h_hist = torch.zeros(1, ppo.policy.hist_dim, device=device)
         t1 = time.time()
         while True:
             with torch.no_grad():
-                pi, _ = ppo.policy(
+                pi, _, h_hist = ppo.policy(
                     state.fea_j_tensor,
                     state.fea_m_tensor,
                     state.fea_pairs_tensor,
                     state.dynamic_pair_mask_tensor,
+                    h_hist,
                 )
                 action_envs = torch.argmax(pi, dim=-1)
                 state, reward, done = env.step(actions=action_envs.cpu().numpy())

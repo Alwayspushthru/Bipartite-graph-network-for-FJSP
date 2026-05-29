@@ -110,17 +110,20 @@ class Trainer:
                 state = self.env.reset()
 
             ep_rewards = - deepcopy(self.env.init_quality)
+            # h is maintained only for rollout sampling; update recomputes from h0=zeros
+            h = torch.zeros(self.num_envs, self.ppo.policy.hist_dim, device=device)
 
             while True:
-                # state store
+                # state store (no h stored — update recomputes from scratch)
                 self.memory.push(state)
                 with torch.no_grad():
-                    action, log_prob, value = self.ppo.policy_old.act(
+                    action, log_prob, value, h = self.ppo.policy_old.act(
                         state.fea_j_tensor,
                         state.fea_m_tensor,
                         state.fea_pairs_tensor,
                         state.candidate_tensor,
                         state.dynamic_pair_mask_tensor,
+                        h,
                     )
 
                 # state transition
@@ -128,6 +131,9 @@ class Trainer:
                 ep_rewards += reward
                 reward = torch.from_numpy(reward).to(device)
                 done_tensor = torch.from_numpy(done).to(device)
+
+                # Reset hidden for envs that finished this step
+                h = h * (~done_tensor).float().unsqueeze(-1)
 
                 self.memory.action_seq.append(action)
                 self.memory.log_probs.append(log_prob)
@@ -216,16 +222,20 @@ class Trainer:
         self.ppo.policy.eval()
         state = self.vali_env.reset()
         done = self.vali_env.env_done
+        n_vali = state.fea_j_tensor.shape[0]
+        h_hist = torch.zeros(n_vali, self.ppo.policy.hist_dim, device=device)
         while not done.all():
             with torch.no_grad():
                 batch_idx = ~torch.from_numpy(done)
-                action_envs, _, _ = self.ppo.policy.act(
+                action_envs, _, _, h_hist_new = self.ppo.policy.act(
                     state.fea_j_tensor[batch_idx],
                     state.fea_m_tensor[batch_idx],
                     state.fea_pairs_tensor[batch_idx],
                     state.candidate_tensor[batch_idx],
                     state.dynamic_pair_mask_tensor[batch_idx],
+                    h_hist[batch_idx],
                 )
+            h_hist[batch_idx] = h_hist_new
             state, _, done = self.vali_env.step(actions=action_envs.cpu().numpy())
         self.ppo.policy.train()
         return self.vali_env.current_makespan
