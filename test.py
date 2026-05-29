@@ -4,6 +4,7 @@ import time
 import torch
 import numpy as np
 import pandas as pd
+from datetime import datetime
 from tqdm import tqdm
 
 from params import configs
@@ -91,9 +92,10 @@ def main(config):
             os.makedirs(save_direc)
 
         for model in test_model:
-            save_path = save_direc + f'/{model[1]}.xlsx'
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            save_path = save_direc + f'/{model[1]}_{timestamp}.xlsx'
 
-            if (not os.path.exists(save_path)) or config.cover_flag:
+            if True:
                 print(f"Model name : {model[1]}")
                 print(f"data name: ./data/{data[1]}")
                 print("Test mode: Greedy")
@@ -105,6 +107,10 @@ def main(config):
                 print(f"time: {save_result[:, 1].mean():.4f}s")
                 print("testing results:")
 
+                log_prefix = f'{timestamp}    model: {model[1]}    data: {data[1]}    '
+                log_indent = ' ' * len(log_prefix)
+                log_lines = []
+
                 if baseline_df is not None and len(baseline_df) == len(save_result):
                     baseline = baseline_df['ub'].values
                     gaps = (save_result[:, 0] - baseline) / baseline * 100
@@ -113,11 +119,13 @@ def main(config):
                         group_labels = baseline_df['benchname'].values
                     else:
                         group_labels = baseline_df['dataname'].str.replace(r'_\d+$', '', regex=True).values
-                    for g_name in sorted(np.unique(group_labels)):
+                    for idx, g_name in enumerate(sorted(np.unique(group_labels))):
                         g_mask = group_labels == g_name
                         g_gaps = gaps[g_mask]
                         g_makespan = save_result[:, 0][g_mask]
                         print(f"  [{g_name}]  makespan={g_makespan.mean():.2f}  gap: mean={g_gaps.mean():.2f}%  std={g_gaps.std():.2f}%")
+                        group_str = f'[{g_name}]  makespan={g_makespan.mean():.2f}  gap: mean={g_gaps.mean():.2f}%  std={g_gaps.std():.2f}%'
+                        log_lines.append((log_prefix if idx == 0 else log_indent) + group_str)
 
                     result_df = pd.DataFrame({
                         'makespan': save_result[:, 0],
@@ -127,8 +135,12 @@ def main(config):
                     })
                 else:
                     result_df = pd.DataFrame(save_result, columns=["makespan", "time"])
+                    log_lines.append(log_prefix + f'makespan={save_result[:, 0].mean():.2f}  time={save_result[:, 1].mean():.4f}s')
 
                 result_df.to_excel(save_path, index=False)
+
+                with open('./test_results/test_log.txt', 'a', encoding='utf-8') as f:
+                    f.write('\n'.join(log_lines) + '\n')
 
 
 if __name__ == "__main__":
