@@ -303,9 +303,10 @@ class FJSPEnv:
         p_span = self.pt_span[self.env_idxs[:, None], self.candidate]
 
         op_ct_lb_cand = self.op_ct_lb[self.env_idxs[:, None], self.candidate]  # [B, J]
-        delay_ratio = np.log1p(
+        raw_delay_ratio = np.log1p(
             np.maximum(0.0, self.candidate_free_time - op_ct_lb_cand) / (op_ct_lb_cand + 1e-8)
         )
+        delay_ratio = raw_delay_ratio * (1.0 - feasible_mas_ratio)
 
         self.fea_j = np.stack((feasible_mas_ratio, job_ready, rem_ops, rem_work, p_mean, p_span, delay_ratio), axis=2)
 
