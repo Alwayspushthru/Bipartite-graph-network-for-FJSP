@@ -24,6 +24,10 @@ train_time.txt
 *.pt
 *.ckpt
 
+data/
+# Test outputs
+test_results/
+
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb

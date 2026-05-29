@@ -134,11 +134,10 @@ def load_data_from_files(directory):
     dataset_job_length = []
     dataset_op_pt = []
     for root, dirs, files in os.walk(directory):
-        # sort files by index
-        files.sort(key=lambda s: int(re.findall("\d+", s)[0]))
-        files.sort(key=lambda s: int(re.findall("\d+", s)[-1]))
+        files = [f for f in files if f.endswith('.fjs')]
+        # sort by (text-prefix, numeric-parts) so groups stay together and instances are in numeric order
+        files.sort(key=lambda s: (re.sub(r'\d+', '', s), [int(n) for n in re.findall(r'\d+', s)]))
         for f in files:
-            # print(f)
             g = open(os.path.join(root, f), 'r').readlines()
             job_length, op_pt = text_to_matrix(g)
             dataset_job_length.append(job_length)

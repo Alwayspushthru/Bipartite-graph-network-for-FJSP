@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from params import configs
 from utils.common_utils import setup_seed, strToSuffix
-from utils.data_utils import load_data_from_files, pack_data_from_config
+from utils.data_utils import load_data_from_files
 from env.FJSPEnv import FJSPEnv
 from model.ppo import PPO_initialize
 
@@ -22,6 +22,21 @@ else:
    torch.set_default_device('cpu')
 
 ppo = PPO_initialize()
+
+_SOLUTION_CSV = {
+    'SD1': 'SD1Solution.csv',
+    'SD2': 'SD2Solution.csv',
+    'BenchData': 'BenchDataSolution.csv',
+}
+
+def load_baseline(data_name):
+    csv_name = _SOLUTION_CSV.get(data_name)
+    if csv_name is None:
+        return None
+    csv_path = f'./data/{data_name}/{csv_name}'
+    if not os.path.exists(csv_path):
+        return None
+    return pd.read_csv(csv_path)
 
 def test_greedy_strategy(data_set, model_path, seed):
     test_result_list = []
@@ -59,21 +74,19 @@ def main(config):
 
     # collect the path of test models
     test_model = []
-    model_path = config.test_path
 
     for model_name in config.test_model:
-        # test_model.append((f'./trained_network/{config.model_source}/{model_name}.pth', model_name))
-        test_model.append((f'./trained_network/{model_path}/{model_name}.pth', model_name))
+        test_model.append((f'./trained_network/{model_name}.pth', model_name))
 
-    # collect the test data
-    test_data = pack_data_from_config(config.data_source, config.test_data)
+    # collect the test data: each entry in test_data is a data source folder (SD1/SD2/BenchData)
+    test_data = [(load_data_from_files(f'./data/{name}'), name) for name in config.test_data]
     model_prefix = "Bgnn-G"
 
     for data in test_data:
         print("-" * 25 + "Test Learned Model" + "-" * 25)
         print(f"test data name: {data[1]}")
         print(f"test mode: {model_prefix}")
-        save_direc = f'./test_results/{config.data_source}/{data[1]}'
+        save_direc = f'./test_results/{data[1]}'
         if not os.path.exists(save_direc):
             os.makedirs(save_direc)
 
@@ -82,22 +95,41 @@ def main(config):
 
             if (not os.path.exists(save_path)) or config.cover_flag:
                 print(f"Model name : {model[1]}")
-                print(f"data name: ./data/{config.data_source}/{data[1]}")
+                print(f"data name: ./data/{data[1]}")
                 print("Test mode: Greedy")
-                result_5_times = []
-                # Greedy mode, test 5 times, record average time.
-                for j in range(1):
-                    result = test_greedy_strategy(data[0], model[0], config.seed_test)
-                    result_5_times.append(result)
-                result_5_times = np.array(result_5_times)
+                # Greedy strategy is deterministic (argmax), so one run suffices.
+                save_result = test_greedy_strategy(data[0], model[0], config.seed_test)
 
-                save_result = np.mean(result_5_times, axis=0)
+                baseline_df = load_baseline(data[1])
+
+                print(f"time: {save_result[:, 1].mean():.4f}s")
                 print("testing results:")
-                print(f"makespan(greedy): ", save_result[:, 0].mean())
-                print(f"time: ", save_result[:, 1].mean())
 
-                result_df = pd.DataFrame(save_result, columns=["makespan", "time"])
+                if baseline_df is not None and len(baseline_df) == len(save_result):
+                    baseline = baseline_df['ub'].values
+                    gaps = (save_result[:, 0] - baseline) / baseline * 100
+
+                    if data[1] == 'BenchData':
+                        group_labels = baseline_df['benchname'].values
+                    else:
+                        group_labels = baseline_df['dataname'].str.replace(r'_\d+$', '', regex=True).values
+                    for g_name in sorted(np.unique(group_labels)):
+                        g_mask = group_labels == g_name
+                        g_gaps = gaps[g_mask]
+                        g_makespan = save_result[:, 0][g_mask]
+                        print(f"  [{g_name}]  makespan={g_makespan.mean():.2f}  gap: mean={g_gaps.mean():.2f}%  std={g_gaps.std():.2f}%")
+
+                    result_df = pd.DataFrame({
+                        'makespan': save_result[:, 0],
+                        'time': save_result[:, 1],
+                        'ref_makespan': baseline,
+                        'gap(%)': gaps.round(2),
+                    })
+                else:
+                    result_df = pd.DataFrame(save_result, columns=["makespan", "time"])
+
                 result_df.to_excel(save_path, index=False)
+
 
 if __name__ == "__main__":
     main(configs)

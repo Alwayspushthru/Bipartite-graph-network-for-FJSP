@@ -73,9 +73,9 @@ parser.add_argument('--log_interval', type=int, default=10, help='Interval (upda
 parser.add_argument('--use_tensorboard', type=str2bool, default=True, help='Whether to enable TensorBoard logging')
 
 # args for test
-parser.add_argument('--test_data', nargs='+', default=['10x5'], help='List of data for testing')
-parser.add_argument('--test_model', nargs='+', default=['10x5'], help='List of model for testing')
-parser.add_argument('--test_path', type=str, default='net1')
+parser.add_argument('--test_data', nargs='+', default=['SD2'], help='Data source folders to test (SD1/SD2/BenchData)')
+parser.add_argument('--test_model', nargs='+', default=['10x5_1'], help='Model names under trained_network/ (without .pth)')
+
 
 # args for testData to excel
 parser.add_argument('--sort_flag', type=str2bool, default=True,
