@@ -120,8 +120,10 @@ class BiGraphNetwork(nn.Module):
         _h_m = self.mach_out(h_m)
         _h_pair = self.pair_out(h_pair)
 
-        h_j_global = self.nonzero_averaging(_h_j)
-        h_m_global = self.nonzero_averaging(_h_m)
+        active_job_mask = ~dynamic_pair_mask.all(dim=-1)   # [B,J] True=active
+        active_mach_mask = ~dynamic_pair_mask.all(dim=1)   # [B,M] True=active
+        h_j_global = self.nonzero_averaging(_h_j, active_job_mask)
+        h_m_global = self.nonzero_averaging(_h_m, active_mach_mask)
 
         h_j_pair = _h_j.unsqueeze(2).expand(-1, -1, M, -1)  # (B,J,M,8)
         h_m_pair = _h_m.unsqueeze(1).expand(-1, J, -1, -1)  # (B,J,M,8)
@@ -169,10 +171,8 @@ class BiGraphNetwork(nn.Module):
         entropy = dist.entropy()
         return log_prob, entropy, value
 
-    def nonzero_averaging(self, x):
-        b = x.sum(dim=-2)
-        y = torch.count_nonzero(x, dim=-1)
-        z = (y != 0).sum(dim=-1, keepdim=True)
-        p = 1 / z
-        p[z == 0] = 0
-        return torch.mul(p, b)
+    def nonzero_averaging(self, x, mask):
+        # x: [B,N,d], mask: [B,N] True=active
+        mask_f = mask.unsqueeze(-1).float()          # [B,N,1]
+        count = mask_f.sum(dim=1).clamp_min(1)       # [B,1]
+        return (x * mask_f).sum(dim=1) / count       # [B,d]
