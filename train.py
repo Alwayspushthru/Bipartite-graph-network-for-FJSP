@@ -240,7 +240,7 @@ class Trainer:
             f'{round((self.train_et - self.train_st), 2)}\t\t local time: {str_time}\n')
 
     def save_model(self):
-        model_dir = f'./trained_network/{self.data_source}'
+        model_dir = f'./trained_network'
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
         torch.save(self.ppo.policy.state_dict(), f'{model_dir}/{self.model_name}.pth')
