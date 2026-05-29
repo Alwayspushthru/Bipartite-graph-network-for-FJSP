@@ -35,8 +35,8 @@ parser.add_argument('--data_source', type=str, default='SD3', help='Suffix of te
 parser.add_argument('--model_source', type=str, default='SD2', help='Suffix of the data that model trained on')
 
 # args for network
-parser.add_argument('--fea_j_input_dim', type=int, default=6, help='Dimension of operation raw feature vectors')
-parser.add_argument('--fea_m_input_dim', type=int, default=4, help='Dimension of machine raw feature vectors')
+parser.add_argument('--fea_j_input_dim', type=int, default=7, help='Dimension of operation raw feature vectors')
+parser.add_argument('--fea_m_input_dim', type=int, default=5, help='Dimension of machine raw feature vectors')
 parser.add_argument('--fea_pair_input_dim', type=int, default=6, help='Dimension of pair raw feature vectors')
 
 parser.add_argument('--num_bigraph_layers', type=int, default=2)

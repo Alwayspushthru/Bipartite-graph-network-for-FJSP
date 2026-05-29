@@ -35,9 +35,9 @@ class FJSPEnv:
         self.old_state = EnvState()
 
         # the dimension of operation raw features
-        self.op_fea_dim = 6
+        self.op_fea_dim = 7
         # the dimension of machine raw features
-        self.mch_fea_dim = 4
+        self.mch_fea_dim = 5
         # the dimension of edge raw features
         self.edge_fea_dim = 6
 
@@ -302,7 +302,12 @@ class FJSPEnv:
         p_mean = self.op_mean_pt[self.env_idxs[:, None], self.candidate]
         p_span = self.pt_span[self.env_idxs[:, None], self.candidate]
 
-        self.fea_j = np.stack((feasible_mas_ratio,job_ready,rem_ops, rem_work, p_mean,p_span),axis=2,)
+        op_ct_lb_cand = self.op_ct_lb[self.env_idxs[:, None], self.candidate]  # [B, J]
+        delay_ratio = np.log1p(
+            np.maximum(0.0, self.candidate_free_time - op_ct_lb_cand) / (op_ct_lb_cand + 1e-8)
+        )
+
+        self.fea_j = np.stack((feasible_mas_ratio, job_ready, rem_ops, rem_work, p_mean, p_span, delay_ratio), axis=2)
 
         mask = self.mask[:,:,None]
         self.fea_j = np.where(mask, 0, self.fea_j)
@@ -345,7 +350,8 @@ class FJSPEnv:
         expect_workload = np.sum(uniform_resp * self.true_op_pt, axis=1)
         
         idle = self.idle_acc
-        self.fea_m = np.stack((feasible_ops_norm, mach_ready, expect_workload, idle), axis=2)
+        utilization = (self.mch_free_time - self.idle_acc) / (self.mch_free_time + 1e-8)
+        self.fea_m = np.stack((feasible_ops_norm, mach_ready, expect_workload, idle, utilization), axis=2)
 
         # 没有删除节点的normalize
         mean_fea_m = np.sum(self.fea_m, axis=1) / self.number_of_machines
