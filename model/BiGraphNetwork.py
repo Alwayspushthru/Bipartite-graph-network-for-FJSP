@@ -97,18 +97,29 @@ class BiGraphNetwork(nn.Module):
         self.mach_mlp = MLP(2, self.fea_m_input_dim, self.fea_embed_dim, self.mes_dim)
         self.pair_mlp = MLP(2, self.fea_pairs_input_dim, self.fea_embed_dim, self.mes_dim)
 
-        self.job_out = nn.Linear(self.mes_dim, 8)
-        self.mach_out = nn.Linear(self.mes_dim, 8)
-        self.pair_out = nn.Linear(self.mes_dim, 8)
+        # Actor path: high-resolution local features for per-(job,machine) discrimination
+        self.actor_dim = 32
+        self.actor_j_proj    = nn.Linear(self.mes_dim, self.actor_dim)
+        self.actor_m_proj    = nn.Linear(self.mes_dim, self.actor_dim)
+        self.actor_pair_proj = nn.Linear(self.mes_dim, self.actor_dim)
 
-        self.hist_dim = 32
-        self.gru_cell = nn.GRUCell(3 * 8, self.hist_dim)
+        # Global path: compact distributional features for Critic and GRU history
+        self.global_dim = 16
+        self.global_j_proj    = nn.Linear(self.mes_dim, self.global_dim)
+        self.global_m_proj    = nn.Linear(self.mes_dim, self.global_dim)
+        self.global_pair_proj = nn.Linear(self.mes_dim, self.global_dim)
 
-        # Actor: 5 local/global embeddings (each 8-dim) + h_hist
-        self.actor = Actor(config.num_mlp_layers_actor, 5 * 8 + self.hist_dim,
+        # GRU input: 3 global means (each global_dim) → [B, 3*global_dim]
+        self.hist_dim = 64
+        self.gru_cell = nn.GRUCell(3 * self.global_dim, self.hist_dim)
+
+        # Actor: local_j + local_m + global_j + global_m + local_pair + h_hist
+        actor_input_dim = 3 * self.actor_dim + 2 * self.global_dim + self.hist_dim
+        self.actor = Actor(config.num_mlp_layers_actor, actor_input_dim,
             config.hidden_dim_actor, 1)
-        # Critic: global graph summary + h_hist
-        self.critic = Critic(config.num_mlp_layers_critic, 3 * 8 + self.hist_dim,
+        # Critic: 3 global means + h_hist
+        critic_input_dim = 3 * self.global_dim + self.hist_dim
+        self.critic = Critic(config.num_mlp_layers_critic, critic_input_dim,
             config.hidden_dim_critic, 1)
 
     def forward(self, fea_j, fea_m, fea_pairs, dynamic_pair_mask, h_hist=None):
@@ -122,42 +133,46 @@ class BiGraphNetwork(nn.Module):
         for layer in self.BiG_layers:
             h_j, h_m, h_pair = layer(h_j, h_m, h_pair, dynamic_pair_mask)
 
-        _h_j = self.job_out(h_j)
-        _h_m = self.mach_out(h_m)
-        _h_pair = self.pair_out(h_pair)
+        # Actor projections — local, high-resolution
+        a_j    = self.actor_j_proj(h_j)       # [B, J, actor_dim]
+        a_m    = self.actor_m_proj(h_m)        # [B, M, actor_dim]
+        a_pair = self.actor_pair_proj(h_pair)  # [B, J, M, actor_dim]
 
-        active_job_mask = ~dynamic_pair_mask.all(dim=-1)   # [B,J]
-        active_mach_mask = ~dynamic_pair_mask.all(dim=1)   # [B,M]
-        h_j_global = self.nonzero_averaging(_h_j, active_job_mask)
-        h_m_global = self.nonzero_averaging(_h_m, active_mach_mask)
+        # Global projections — compact, suited for mean pooling
+        g_j    = self.global_j_proj(h_j)       # [B, J, global_dim]
+        g_m    = self.global_m_proj(h_m)        # [B, M, global_dim]
+        g_pair = self.global_pair_proj(h_pair)  # [B, J, M, global_dim]
 
-        mask = ~dynamic_pair_mask
-        h_pair_sum = (_h_pair * mask.unsqueeze(-1)).sum(dim=(1, 2))
-        num_valid = mask.sum(dim=(1, 2)).clamp_min(1).unsqueeze(-1)
-        h_pair_global = h_pair_sum / num_valid  # [B, 8]
+        active_job_mask  = ~dynamic_pair_mask.all(dim=-1)  # [B, J]
+        active_mach_mask = ~dynamic_pair_mask.all(dim=1)   # [B, M]
+        g_j_global = self.nonzero_averaging(g_j, active_job_mask)   # [B, global_dim]
+        g_m_global = self.nonzero_averaging(g_m, active_mach_mask)  # [B, global_dim]
 
-        h_graph = torch.cat([h_j_global, h_m_global, h_pair_global], dim=-1)  # [B, 24]
+        valid_pair_mask = ~dynamic_pair_mask
+        g_pair_global = (g_pair * valid_pair_mask.unsqueeze(-1)).sum(dim=(1, 2)) \
+                        / valid_pair_mask.sum(dim=(1, 2)).clamp_min(1).unsqueeze(-1)  # [B, global_dim]
 
-        # GRU: compress trajectory into h_hist
+        h_graph = torch.cat([g_j_global, g_m_global, g_pair_global], dim=-1)  # [B, 3*global_dim]
+
         if h_hist is None:
             h_hist = torch.zeros(B, self.hist_dim, device=fea_j.device)
         h_hist_new = self.gru_cell(h_graph, h_hist)
 
-        # Actor: per-(job, machine) pair features + h_hist broadcast
-        h_j_pair = _h_j.unsqueeze(2).expand(-1, -1, M, -1)
-        h_m_pair = _h_m.unsqueeze(1).expand(-1, J, -1, -1)
-        h_j_global_pair = h_j_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
-        h_m_global_pair = h_m_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
-        h_hist_pair = h_hist_new.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
+        # Broadcast for per-(job,machine) actor input
+        a_j_exp        = a_j.unsqueeze(2).expand(-1, -1, M, -1)
+        a_m_exp        = a_m.unsqueeze(1).expand(-1, J, -1, -1)
+        g_j_global_exp = g_j_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
+        g_m_global_exp = g_m_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
+        h_hist_exp     = h_hist_new.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
 
         candidate_feature = torch.cat([
-            h_j_pair.reshape(B, J * M, 8),
-            h_m_pair.reshape(B, J * M, 8),
-            h_j_global_pair.reshape(B, J * M, 8),
-            h_m_global_pair.reshape(B, J * M, 8),
-            _h_pair.reshape(B, J * M, 8),
-            h_hist_pair.reshape(B, J * M, self.hist_dim),
-        ], dim=-1)  # [B, J*M, 5*8 + hist_dim]
+            a_j_exp.reshape(B, J * M, self.actor_dim),
+            a_m_exp.reshape(B, J * M, self.actor_dim),
+            g_j_global_exp.reshape(B, J * M, self.global_dim),
+            g_m_global_exp.reshape(B, J * M, self.global_dim),
+            a_pair.reshape(B, J * M, self.actor_dim),
+            h_hist_exp.reshape(B, J * M, self.hist_dim),
+        ], dim=-1)  # [B, J*M, 3*actor_dim + 2*global_dim + hist_dim]
 
         logits = self.actor(candidate_feature).squeeze(-1)
         logits[dynamic_pair_mask.reshape(B, -1)] = float('-inf')

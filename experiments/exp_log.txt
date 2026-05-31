@@ -55,9 +55,22 @@ Hypothesis: raw time-valued pair features (start, wait_job, wait_mach) accumulat
 Decision rule: compare greedy gaps against baseline 6.30/5.39, 15.80/0.90, 26.99/16.62/10.94/5.91; keep if overall mean improves without broad regression.
 
 20260531_pair_norm result: revert
-Result:
-- SD1 gap: 6.30/5.39 -> 5.44/3.99 (-0.86/-1.40 pp, better)
-- SD2 gap: 15.80/0.90 -> 22.13/7.66 (+6.33/+6.76 pp, worse)
-- BenchData gap: Brandimarte 26.99 -> 31.61, Hurink_edata 16.62 -> 13.01, Hurink_rdata 10.94 -> 10.83, Hurink_vdata 5.91 -> 5.47
-- Overall mean gap over 8 groups: 11.11 -> 12.52 (+1.41 pp worse)
-Conclusion: pair normalization helps SD1 and some BenchData (Hurink_edata -3.61pp) but causes large SD2 regression (+6.33/+6.76pp). SD2 test instances (30x10+mix, 40x10+mix) use SD2 mix structure (fixed ops/job = n_m) which differs from SD3 training; normalizing pair features likely shifts the feature distribution in a way that hurts this specific OOD gap. Benefit on SD1 confirms the scale-mismatch hypothesis is partially correct, but the cure is not uniform across datasets. Revert; the asymmetric effect suggests a more targeted approach (e.g. mixed-size training) is needed rather than feature-level normalization.
+
+20260531_decoupled_projection setting
+Baseline: recurrent PPO + delay gating, actor+critic both use history, hist_dim=32. Single Linear(128→8) projection shared by actor local features, global mean pooling, and GRU input.
+Change: replace single bottleneck with two independent projection paths.
+  - Actor path: actor_j_proj / actor_m_proj / actor_pair_proj Linear(128→32), used only for per-(job,machine) logit computation.
+  - Global path: global_j_proj / global_m_proj / global_pair_proj Linear(128→16), used only for mean pooling → Critic and GRU.
+  - GRU input: 3×16=48 (was 24). GRU hidden: hist_dim 32→64.
+  - Actor input dim: 3×32 + 2×16 + 64 = 192 (was 72). Critic input dim: 3×16 + 64 = 112 (was 56).
+Hypothesis: the original 128→8 projection served three conflicting gradient sources simultaneously (policy loss for local discrimination, value loss + temporal loss for global summarization). Decoupling lets each projection specialize: actor_*_proj learns high-resolution discriminative features; global_*_proj learns distributional features that remain meaningful after mean pooling. Net parameter increase is modest (~20%), but each projection is freed from conflicting gradient interference.
+Decision rule: compare greedy gaps against baseline 6.30/5.39, 15.80/0.90, 26.99/16.62/10.94/5.91; keep if overall mean improves without broad regression.
+
+20260531_decoupled_projection result: inconclusive — needs another run
+Result (20260531_192704):
+- SD1 gap: 6.30/5.39 -> 5.71/5.38 (-0.59/-0.01 pp, better)
+- SD2 gap: 15.80/0.90 -> 16.08/2.72 (+0.28/+1.82 pp, worse)
+- BenchData gap: Brandimarte 26.99 -> 27.83, Hurink_edata 16.62 -> 16.21, Hurink_rdata 10.94 -> 12.61, Hurink_vdata 5.91 -> 6.11
+- Overall mean gap over 8 groups: 11.11 -> 11.58 (+0.47 pp worse)
+Noise assessment: all regressions fall within historical training variance (SD2 40x10+mix range 0.90~8.68%, Brandimarte 24.28~37.71%, Hurink_rdata 10.83~12.98%). The +0.47 pp overall regression is not statistically distinguishable from noise in a single run. SD1 improved (-0.59 pp) and Hurink_edata improved (-0.41 pp).
+Conclusion: result is ambiguous — overall mean regressed slightly but within noise bounds; does not meet the revert threshold. Architecture change is theoretically sounder. A second independent training run is needed to confirm whether regression is real or stochastic.
