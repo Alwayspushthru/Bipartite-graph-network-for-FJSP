@@ -32,7 +32,6 @@ parser.add_argument('--seed_test', type=int, default=50, help='Seed for testing 
 
 # args for data load
 parser.add_argument('--data_source', type=str, default='SD3', help='Suffix of test data')
-parser.add_argument('--model_source', type=str, default='SD2', help='Suffix of the data that model trained on')
 
 # args for network
 parser.add_argument('--fea_j_input_dim', type=int, default=7, help='Dimension of operation raw feature vectors')
@@ -61,7 +60,6 @@ parser.add_argument('--tau', type=float, default=0, help='Policy soft update coe
 parser.add_argument('--gae_lambda', type=float, default=0.98, help='GAE parameter')
 
 # args for training
-parser.add_argument('--train_size', type=str, default="20x10", help='Size of training instances')
 parser.add_argument('--validate_timestep', type=int, default=10, help='Interval for validation and data log')
 parser.add_argument('--reset_env_timestep', type=int, default=20, help='Interval for reseting the environment')
 parser.add_argument('--minibatch_size', type=int, default=1024, help='Batch size for computing the gradient')
@@ -80,6 +78,10 @@ parser.add_argument('--test_model', nargs='+', default=['10x5_1'], help='Model n
 # args for testData to excel
 parser.add_argument('--sort_flag', type=str2bool, default=True,
                     help='Whether sorting the printed results by the makespan')
+
+# args for inference mode
+parser.add_argument('--n_samples', type=int, default=1,
+                    help='Number of stochastic rollouts per instance at test time. 1 = greedy (argmax).')
 
 # args for selfplay
 parser.add_argument('--n_j', type=int, default=10, help='Number of jobs of the instance')

@@ -70,6 +70,45 @@ def test_greedy_strategy(data_set, model_path, seed):
 
     return np.array(test_result_list)
 
+
+def test_sampling_strategy(data_set, model_path, seed, n_samples):
+    """Run n_samples stochastic rollouts per instance; keep the best makespan."""
+    test_result_list = []
+    setup_seed(seed)
+    ppo.policy.load_state_dict(torch.load(model_path, map_location='cuda', weights_only=True))
+    ppo.policy.eval()
+
+    env = FJSPEnv(device)
+
+    for i in tqdm(range(len(data_set[0])), file=sys.stdout, desc="progress", colour='blue'):
+        env.set_initial_data([data_set[0][i]], [data_set[1][i]])
+        t1 = time.time()
+        best_makespan = float('inf')
+
+        for _ in range(n_samples):
+            state = env.reset()
+            h_hist = torch.zeros(1, ppo.policy.hist_dim, device=device)
+            while True:
+                with torch.no_grad():
+                    pi, _, h_hist = ppo.policy(
+                        state.fea_j_tensor,
+                        state.fea_m_tensor,
+                        state.fea_pairs_tensor,
+                        state.dynamic_pair_mask_tensor,
+                        h_hist,
+                    )
+                    dist = torch.distributions.Categorical(pi)
+                    action_envs = dist.sample()
+                    state, _, done = env.step(actions=action_envs.cpu().numpy())
+                    if done:
+                        break
+            best_makespan = min(best_makespan, env.current_makespan[0])
+
+        t2 = time.time()
+        test_result_list.append([best_makespan, t2 - t1])
+
+    return np.array(test_result_list)
+
 def main(config):
     setup_seed(config.seed_test)
     if not os.path.exists('./test_results'):
@@ -94,22 +133,30 @@ def main(config):
             os.makedirs(save_direc)
 
         for model in test_model:
+            n_samples = config.n_samples
+            use_sampling = n_samples > 1
+            mode_str = f"Sampling×{n_samples}" if use_sampling else "Greedy"
+            model_prefix = f"Bgnn-S{n_samples}" if use_sampling else "Bgnn-G"
+
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            save_path = save_direc + f'/{model[1]}_{timestamp}.xlsx'
+            save_path = save_direc + f'/{model[1]}_{model_prefix}_{timestamp}.xlsx'
 
             if True:
                 print(f"Model name : {model[1]}")
                 print(f"data name: ./data/{data[1]}")
-                print("Test mode: Greedy")
-                # Greedy strategy is deterministic (argmax), so one run suffices.
-                save_result = test_greedy_strategy(data[0], model[0], config.seed_test)
+                print(f"Test mode: {mode_str}")
+                if use_sampling:
+                    save_result = test_sampling_strategy(data[0], model[0], config.seed_test, n_samples)
+                else:
+                    # Greedy strategy is deterministic (argmax), so one run suffices.
+                    save_result = test_greedy_strategy(data[0], model[0], config.seed_test)
 
                 baseline_df = load_baseline(data[1])
 
                 print(f"time: {save_result[:, 1].mean():.4f}s")
                 print("testing results:")
 
-                log_prefix = f'{timestamp}    model: {model[1]}    data: {data[1]}    '
+                log_prefix = f'{timestamp}    model: {model[1]}    data: {data[1]}    mode: {mode_str}    '
                 log_indent = ' ' * len(log_prefix)
                 log_lines = []
 

@@ -1,0 +1,63 @@
+20260530_1343     actor-only history 改动
+20260530_1450     actor-only history result: revert
+Baseline: recurrent PPO + delay gating, actor+critic both use history.
+Change: critic uses only h_graph; history is kept only in actor.
+Result:
+- SD1 gap: 6.30/5.39 -> 7.17/6.32
+- SD2 gap: 15.80/0.90 -> 21.61/8.21
+- BenchData gap: Brandimarte 26.99 -> 28.80, Hurink_edata 16.62 -> 20.35, Hurink_rdata 10.94 -> 12.01, Hurink_vdata 5.91 -> 8.84
+- Overall mean gap over 8 groups: 11.11 -> 14.16 (+3.06 pp worse)
+Conclusion: removing history from critic hurts overall performance, especially SD2 40x10+mix and Hurink. This suggests the critic also needs recurrent history for useful advantage estimates; keep actor+critic history as baseline and do not keep actor-only.
+
+20260530_1622     hist_dim=16 result: revert
+Baseline: recurrent PPO + delay gating, actor+critic both use history, hist_dim=32.
+Change: hist_dim 32 -> 16. This reduces GRU hidden size, actor input 72 -> 56, critic input 56 -> 40.
+Result:
+- SD1 gap: 6.30/5.39 -> 7.06/6.37
+- SD2 gap: 15.80/0.90 -> 21.12/8.52
+- BenchData gap: Brandimarte 26.99 -> 29.79, Hurink_edata 16.62 -> 22.54, Hurink_rdata 10.94 -> 12.76, Hurink_vdata 5.91 -> 5.67
+- Overall mean gap over 8 groups: 11.11 -> 14.98 (+3.87 pp worse)
+Conclusion: reducing history capacity to 16 hurts most datasets, especially SD2 and Hurink_edata. The only improvement is Hurink_vdata, but it is too small to offset broad regression. Keep hist_dim=32 for now.
+
+20260530_actor_pre_update_history setting
+Baseline: recurrent PPO + delay gating, actor+critic both use history, hist_dim=32.
+Change: actor receives pre-update h_hist instead of h_hist_new; critic still receives h_graph + h_hist_new.
+Hypothesis: actor already receives current graph/candidate features, so using pre-update history may reduce duplicate current-state encoding while preserving recurrent value estimation.
+Decision rule: compare against current baseline gaps 6.30/5.39, 15.80/0.90, 26.99/16.62/10.94/5.91; keep only if overall mean improves without broad BenchData regression.
+
+20260530_1755     actor_pre_update_history result: revert
+Result:
+- SD1 gap: 6.30/5.39 -> 6.59/5.76
+- SD2 gap: 15.80/0.90 -> 16.90/3.41
+- BenchData gap: Brandimarte 26.99 -> 37.71, Hurink_edata 16.62 -> 26.63, Hurink_rdata 10.94 -> 18.87, Hurink_vdata 5.91 -> 8.51
+- Overall mean gap over 8 groups: 11.11 -> 15.55 (+4.45 pp worse)
+Conclusion: using pre-update history in the actor is worse across all datasets, with a large BenchData regression. The current-state graph update inside h_hist_new is not redundant; it likely gives the actor a useful recurrent summary of the current dispatch state. Keep actor input as h_hist_new.
+
+20260530_inference_sampling setting
+Baseline: 10x5_his2 greedy (no retraining).
+Change: inference mode greedy (argmax) -> sampling×8 (Categorical.sample ×8, keep best makespan per instance).
+Hypothesis: high-variance BenchData (Brandimarte std=22.59%) should benefit from sampling; synthetic SD1/SD2 may be near-deterministic and not benefit.
+
+20260530_2101     inference_sampling result: keep for BenchData only
+Model: 10x5_his2. Reference greedy: SD1 6.47/5.86, SD2 15.54/2.58, BenchData 33.10/17.28/11.18/8.84.
+Result (Sampling×8):
+- SD1 gap: 6.47/5.86 -> 8.02/8.24 (+1.55/+2.38 pp worse)
+- SD2 gap: 15.54/2.58 -> 20.73/8.81 (+5.19/+6.23 pp worse)
+- BenchData gap: Brandimarte 33.10 -> 26.19, Hurink_edata 17.28 -> 15.91, Hurink_rdata 11.18 -> 9.44, Hurink_vdata 8.84 -> 6.82
+- BenchData mean: 17.60 -> 14.59 (-3.01 pp better)
+- Overall mean gap over 8 groups: 12.61 -> 13.02 (+0.41 pp worse overall)
+Conclusion: sampling significantly improves BenchData (especially Brandimarte -6.91 pp) but degrades SD1/SD2. SD1/SD2 policy has low entropy (model is confident), so sampling draws worse solutions. BenchData policy has high entropy (OOD uncertainty), so sampling finds better solutions. Use greedy for SD1/SD2 evaluation; sampling×8 is a useful optional enhancement for BenchData. Root cause of SD1/SD2 plateau is systematic bias, not variance — next experiment targets pair feature normalization (exp G) to fix scale mismatch between training (20x10) and test sizes (30x10, 40x10).
+
+20260530_pair_norm setting
+Baseline: recurrent PPO + delay gating, actor+critic both use history, hist_dim=32. fea_j and fea_m are per-env standardized; fea_pairs was NOT normalized.
+Change: add per-env masked standardization to construct_pair_features() at end of each step, normalizing over feasible (job, machine) pairs only — consistent with fea_j/fea_m treatment.
+Hypothesis: raw time-valued pair features (start, wait_job, wait_mach) accumulate and grow with episode length; a 40x10 instance has ~2x the episode length of 20x10 training, causing systematic scale mismatch. Normalizing should remove this bias and improve SD1/SD2 generalization to larger sizes, and also help BenchData OOD.
+Decision rule: compare greedy gaps against baseline 6.30/5.39, 15.80/0.90, 26.99/16.62/10.94/5.91; keep if overall mean improves without broad regression.
+
+20260531_pair_norm result: revert
+Result:
+- SD1 gap: 6.30/5.39 -> 5.44/3.99 (-0.86/-1.40 pp, better)
+- SD2 gap: 15.80/0.90 -> 22.13/7.66 (+6.33/+6.76 pp, worse)
+- BenchData gap: Brandimarte 26.99 -> 31.61, Hurink_edata 16.62 -> 13.01, Hurink_rdata 10.94 -> 10.83, Hurink_vdata 5.91 -> 5.47
+- Overall mean gap over 8 groups: 11.11 -> 12.52 (+1.41 pp worse)
+Conclusion: pair normalization helps SD1 and some BenchData (Hurink_edata -3.61pp) but causes large SD2 regression (+6.33/+6.76pp). SD2 test instances (30x10+mix, 40x10+mix) use SD2 mix structure (fixed ops/job = n_m) which differs from SD3 training; normalizing pair features likely shifts the feature distribution in a way that hurts this specific OOD gap. Benefit on SD1 confirms the scale-mismatch hypothesis is partially correct, but the cure is not uniform across datasets. Revert; the asymmetric effect suggests a more targeted approach (e.g. mixed-size training) is needed rather than feature-level normalization.
