@@ -104,6 +104,13 @@ class FJSPEnv:
         self.op_max_pt = op_pt_ma.max(axis=2).filled(0)
         self.pt_span = self.op_max_pt - self.op_min_pt
 
+        # Precomputed prefix-sum of op_mean_pt for O(1) range-sum queries in construct_candidate_features.
+        # Shape [B, O_max+1]: col 0 is zero, col i+1 = sum of op_mean_pt[:, 0:i+1].
+        self.op_mean_pt_cumsum = np.concatenate(
+            [np.zeros((self.number_of_envs, 1)), np.cumsum(self.op_mean_pt, axis=1)],
+            axis=1,
+        )  # [B, O_max+1]
+
         # the estimated lower bound of complete time of operations
         self.op_ct_lb = copy.deepcopy(self.op_min_pt) # 每个操作的估计完工时间
         for k in range(self.number_of_envs):
@@ -289,15 +296,11 @@ class FJSPEnv:
         job_ready = self.candidate_free_time
         rem_ops = (self.job_length - self.candidate + self.job_first_op_id) / self.job_length
 
-        rem_work = []
-        for env_idx in range(self.number_of_envs):
-            job_work = []
-            for job_idx in range(self.number_of_jobs):
-                start = self.candidate[env_idx, job_idx]
-                end = self.job_last_op_id[env_idx, job_idx] + 1
-                job_work.append(np.sum(self.op_mean_pt[env_idx, start:end]))
-            rem_work.append(job_work)
-        rem_work = np.array(rem_work)
+        rem_work = np.maximum(0,
+            self.op_mean_pt_cumsum[self.env_idxs[:, None], self.job_last_op_id + 1] -
+            self.op_mean_pt_cumsum[self.env_idxs[:, None], self.candidate]
+        )  # [B, J]
+        rem_work = np.where(self.mask, 0.0, rem_work)
 
         p_mean = self.op_mean_pt[self.env_idxs[:, None], self.candidate]
         p_span = self.pt_span[self.env_idxs[:, None], self.candidate]
