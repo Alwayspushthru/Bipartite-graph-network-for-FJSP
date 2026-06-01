@@ -5,62 +5,94 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from model.sub_layers import MLP, Actor, Critic
 
-class BiGraphLayer(nn.Module):
-    def __init__(self, d):
-        super(BiGraphLayer, self).__init__()
-        # O <- M
-        self.Wq_o = nn.Linear(d, d, bias=False)
-        self.Wk_m = nn.Linear(d, d, bias=False)
-        self.Wv_m = nn.Linear(d, d, bias=False)
-        self.wa = nn.Linear(d, 1, bias=False)
+
+class BiGraphAttention(nn.Module):
+    """
+    Multi-head cross-attention adapted for FJSP bipartite graph.
+    Restores the two FJSP-specific mechanisms from the original single-head design:
+      1. pair-wise attention bias  — wa(h_pair) projected to H scalars per pair/head
+      2. pair-wise gate            — Wg applied to attention-weighted pair features
+    """
+    def __init__(self, d, num_heads=2):
+        super().__init__()
+        assert d % num_heads == 0
+        self.num_heads = num_heads
+        self.head_dim  = d // num_heads
+        self.scale     = math.sqrt(self.head_dim)
+
+        self.Wq = nn.Linear(d, d, bias=False)
+        self.Wk = nn.Linear(d, d, bias=False)
+        self.Wv = nn.Linear(d, d, bias=False)
+        self.Wo = nn.Linear(d, d, bias=False)
+
+        # pair-wise attention bias: d → num_heads scalars per (query, key) pair
+        self.wa = nn.Linear(d, num_heads, bias=False)
+        # pair-wise gate using attention-weighted pair features
         self.Wg = nn.Linear(d, d, bias=True)
-        self.ln_j = nn.LayerNorm(d)
 
-        # M <- O
-        self.Wq_m = nn.Linear(d, d, bias=False)
-        self.Wk_o = nn.Linear(d, d, bias=False)
-        self.Wv_o = nn.Linear(d, d, bias=False)
-        self.wa_mo = nn.Linear(d, 1, bias=False)
-        self.Wg_mo = nn.Linear(d, d, bias=True)
-        self.ln_m = nn.LayerNorm(d)
+    def forward(self, query_feat, key_feat, h_pair, mask):
+        """
+        query_feat: [B, Nq, d]
+        key_feat:   [B, Nk, d]
+        h_pair:     [B, Nq, Nk, d]  — query-indexed pair features
+        mask:       [B, Nq, Nk]     — True = invalid pair
+        """
+        B, Nq, d = query_feat.shape
+        Nk = key_feat.size(1)
+        H, Dh = self.num_heads, self.head_dim
 
-        # P <- (O, M, P)
-        self.Wp = nn.Linear(3 * d, d, bias=True)
+        # Project and split into heads: [B, H, N, Dh]
+        q = self.Wq(query_feat).reshape(B, Nq, H, Dh).transpose(1, 2)
+        k = self.Wk(key_feat).reshape(B, Nk, H, Dh).transpose(1, 2)
+        v = self.Wv(key_feat).reshape(B, Nk, H, Dh).transpose(1, 2)
+
+        # Scaled dot-product scores: [B, H, Nq, Nk]
+        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
+
+        # Pair-wise attention bias: [B, Nq, Nk, H] -> [B, H, Nq, Nk]
+        pair_bias = self.wa(h_pair).permute(0, 3, 1, 2)
+        scores = scores + pair_bias
+
+        # Mask invalid pairs then softmax
+        scores = scores.masked_fill(mask.unsqueeze(1), -1e9)
+        alpha = F.softmax(scores, dim=-1)  # [B, H, Nq, Nk]
+
+        # Aggregate values: [B, H, Nq, Dh] -> [B, Nq, d]
+        agg = torch.matmul(alpha, v).transpose(1, 2).reshape(B, Nq, d)
+        agg = self.Wo(agg)
+
+        # Pair-wise gate: weight h_pair by mean attention across heads
+        alpha_mean = alpha.mean(dim=1)                              # [B, Nq, Nk]
+        h_pair_ctx = (alpha_mean.unsqueeze(-1) * h_pair).sum(dim=2) # [B, Nq, d]
+        gate = 1.0 + torch.tanh(self.Wg(h_pair_ctx))               # [B, Nq, d]
+
+        return agg * gate
+
+
+class BiGraphLayer(nn.Module):
+    def __init__(self, d, num_heads=2):
+        super(BiGraphLayer, self).__init__()
+        self.attn_om = BiGraphAttention(d, num_heads)  # O <- M
+        self.ln_j    = nn.LayerNorm(d)
+
+        self.attn_mo = BiGraphAttention(d, num_heads)  # M <- O
+        self.ln_m    = nn.LayerNorm(d)
+
+        self.Wp   = nn.Linear(3 * d, d, bias=True)    # P <- (O, M, P)
         self.ln_p = nn.LayerNorm(d)
 
     def forward(self, h_j, h_m, h_pair, dynamic_pair_mask):
-        B, J, d = h_j.shape
+        _, J, _ = h_j.shape
         M = h_m.size(1)
 
-        # ===================== O <- M (aggregate only) =====================
-        q = self.Wq_o(h_j).unsqueeze(2)  # [B,J,1,d]
-        k = self.Wk_m(h_m).unsqueeze(1)  # [B,1,M,d]
-        v = self.Wv_m(h_m).unsqueeze(1)  # [B,1,M,d]
+        # ===================== O <- M =====================
+        agg_j = self.attn_om(h_j, h_m, h_pair, dynamic_pair_mask)
 
-        score = (q * k).sum(-1) / math.sqrt(d)  # [B,J,M]
-        score = score + self.wa(h_pair).squeeze(-1)
-        score = score.masked_fill(dynamic_pair_mask, -1e9)
-        alpha = F.softmax(score, dim=2)  # over M
-        gate = 1.0 + torch.tanh(self.Wg(h_pair))  # [B,J,M,d]
-        agg_j = (alpha.unsqueeze(-1) * v * gate).sum(dim=2)  # [B,J,d]
-
-        # ===================== M <- O (aggregate only, uses original h_j) =====================
-        q2 = self.Wq_m(h_m).unsqueeze(1)  # [B,1,M,d]
-        k2 = self.Wk_o(h_j).unsqueeze(2)  # [B,J,1,d]  ← original h_j
-        v2 = self.Wv_o(h_j).unsqueeze(2)  # [B,J,1,d]  ← original h_j
-
-        score2 = (q2 * k2).sum(-1) / math.sqrt(d)  # [B,J,M]
-        score2 = score2 + self.wa_mo(h_pair).squeeze(-1)
-        score2 = score2.masked_fill(dynamic_pair_mask, -1e9)
-
-        all_invalid_m = dynamic_pair_mask.all(dim=1, keepdim=True)  # [B,1,M]
-        score2 = score2.masked_fill(all_invalid_m, 0.0)
-
-        alpha2 = F.softmax(score2, dim=1)  # over J
-        alpha2 = alpha2.masked_fill(all_invalid_m, 0.0)
-
-        gate2 = 1.0 + torch.tanh(self.Wg_mo(h_pair))  # [B,J,M,d]
-        agg_m = (alpha2.unsqueeze(-1) * v2 * gate2).sum(dim=1)  # [B,M,d]
+        # ===================== M <- O =====================
+        # h_pair transposed so machines are the query dimension
+        agg_m = self.attn_mo(h_m, h_j,
+                              h_pair.transpose(1, 2),
+                              dynamic_pair_mask.transpose(1, 2))
 
         # ===================== Apply both updates in parallel =====================
         h_j = self.ln_j(h_j + agg_j)
@@ -70,8 +102,7 @@ class BiGraphLayer(nn.Module):
         h_j_pair = h_j.unsqueeze(2).expand(-1, -1, M, -1)
         h_m_pair = h_m.unsqueeze(1).expand(-1, J, -1, -1)
         pair_input = torch.cat([h_j_pair, h_m_pair, h_pair], dim=-1)
-        pair_delta = torch.tanh(self.Wp(pair_input))
-        h_pair = self.ln_p(h_pair + pair_delta)
+        h_pair = self.ln_p(h_pair + torch.tanh(self.Wp(pair_input)))
 
         return h_j, h_m, h_pair
 

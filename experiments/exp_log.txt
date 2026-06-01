@@ -89,3 +89,43 @@ Result (20260531_225227):
 - Overall mean gap over 8 groups: 11.11 -> 11.52 (+0.41 pp worse)
 Noise assessment: SD2 regression is the main risk. SD2 40x10+mix has historically ranged 0.90~8.68% so 5.00% is within range; SD2 30x10+mix has reached 21.49% before so 18.50% is not clearly abnormal. BenchData Hurink shows consistent improvement across both architecture changes (edata -0.80 pp, rdata -1.45 pp, vdata -1.18 pp vs baseline), suggesting a genuine positive OOD signal. Incremental gain over decoupled-only run (rdata -3.12 pp) further supports that parallel updates add real value.
 Conclusion: inconclusive on SD2; positive on SD1 and Hurink. A second run is needed to determine whether SD2 30x10+mix stabilizes above 17% (systematic regression) or falls back to ~16% (noise). If noise, architecture is worth keeping; if systematic, a targeted fix for SD2 generalization is required.
+
+20260601_multihead_attention setting
+Baseline: parallel BiGraphLayer with custom single-head attention (hand-written Q/K/V + pair-wise bias wa/wa_mo + gate).
+Change: replace custom single-head attention in BiGraphLayer with nn.MultiheadAttention (num_heads=2, batch_first=True, d=128 → each head dim=64).
+  - O←M: attn_om(query=h_j, key=h_m, value=h_m, key_padding_mask=machines_all_invalid)
+  - M←O: attn_mo(query=h_m, key=h_j, value=h_j, key_padding_mask=jobs_all_invalid)
+  - pair-wise attention bias (wa, wa_mo) removed; gate now uses h_pair.mean() as approximation.
+  - Parameter count change: similar total, but Q/K/V projections are now fused and internally split per head.
+Hypothesis: multi-head attention allows each head to specialize in a different relational pattern (e.g., one head tracks processing-time similarity, another tracks load balance). Two heads keep each subspace large (64-dim) to avoid overfitting on limited FJSP relational diversity. The main risk is that removing the pair-wise bias loses per-(job,machine) edge information that was previously injected into the attention score.
+Decision rule: compare greedy gaps against baseline 6.30/5.39, 15.80/0.90, 26.99/16.62/10.94/5.91; keep if overall mean improves without broad regression.
+
+20260601_num_heads=4 result: switch to num_heads=2
+Result (20260601_103019 ~ 20260601_104756, num_heads=4):
+- SD1 gap: 6.30/5.39 -> 6.47/6.46 (+0.17/+1.07 pp, worse)
+- SD2 gap: 15.80/0.90 -> 20.82/5.97 (+5.02/+5.07 pp, worse)
+- BenchData gap: Brandimarte 26.99 -> 28.48, Hurink_edata 16.62 -> 16.62, Hurink_rdata 10.94 -> 10.08, Hurink_vdata 5.91 -> 4.26
+- Overall mean gap over 8 groups: 11.11 -> 12.40 (+1.29 pp worse)
+Noise assessment: SD2 regression is the main concern — 30x10+mix jumped +5.02 pp (well above noise, historical range 15.54~21.49%), and 40x10+mix also regressed +5.07 pp (from near-zero 0.90% to 5.97%). SD1 40x10 regressed +1.07 pp. BenchData is mixed: Hurink_rdata (-0.86 pp) and Hurink_vdata (-1.65 pp) improved, but the SD2 regression dominates.
+Conclusion: num_heads=4 (each head dim=32) is too narrow for this task — it likely fragments the job-machine relational space into overly specialized subspaces that do not generalize to larger problem sizes. Switched to num_heads=2 (each head dim=64); needs a new training run to confirm.
+
+20260601_bigraph_attention setting
+Baseline: parallel BiGraphLayer with generic nn.MultiheadAttention (num_heads=2, pair-wise bias and gate removed).
+Change: replace nn.MultiheadAttention with custom BiGraphAttention module that restores the two FJSP-specific mechanisms in a multi-head formulation.
+  - pair-wise attention bias: wa(h_pair) → [B, Nq, Nk, num_heads] → added to scores per head (was single scalar in original).
+  - pair-wise gate: Wg applied to attention-weighted pair context h_pair_ctx = Σ_k α_k * h_pair_k (was exact per-pair gate in original; now attention-weighted mean, preserves pair selectivity without O(J×M×d) expansion during gate computation).
+  - output projection Wo added (standard multi-head practice).
+  - num_heads=2, head_dim=64, d=128. Interface: BiGraphAttention(query_feat, key_feat, h_pair, mask).
+  - M←O direction passes h_pair.transpose(1,2) so machines are query dimension.
+Hypothesis: the regression in the previous nn.MultiheadAttention runs was caused by removing the pair-wise attention bias and degrading the gate to a uniform mean. Restoring both in a multi-head formulation should recover at least single-head performance while retaining the capacity for heads to specialize on different relational aspects of the FJSP graph.
+Decision rule: compare greedy gaps against baseline 6.30/5.39, 15.80/0.90, 26.99/16.62/10.94/5.91; keep if overall mean improves without broad regression.
+
+20260601_bigraph_attention result: inconclusive — Hurink_vdata regression needs second run
+Result (20260601_140525 ~ 20260601_142341, num_heads=2, head_dim=64):
+- SD1 gap: 6.30/5.39 -> 5.68/5.53 (-0.62/+0.14 pp)
+- SD2 gap: 15.80/0.90 -> 15.37/3.56 (-0.43/+2.66 pp)
+- BenchData gap: Brandimarte 26.99 -> 25.76, Hurink_edata 16.62 -> 16.04, Hurink_rdata 10.94 -> 11.70, Hurink_vdata 5.91 -> 7.97
+- Overall mean gap over 8 groups: 11.11 -> 11.45 (+0.34 pp worse)
+Noise assessment: SD2 40x10+mix regression (+2.66 pp, 0.90→3.56) is likely noise — 0.90% was historically the best ever recorded and the range is 0.90~8.68%. Hurink_vdata regression (+2.06 pp, 5.91→7.97) is the main concern; this group has been relatively stable historically and the move is large enough to warrant verification. Improvements on SD1 30x10 (-0.62 pp), SD2 30x10+mix (-0.43 pp), Brandimarte (-1.23 pp), Hurink_edata (-0.58 pp) are encouraging and suggest the restored pair-wise bias is contributing positively.
+Comparison: overall mean 11.45% vs num_heads=4 generic MHA 12.40% — restoring pair bias and gate recovered most of the MHA regression. Still +0.34 pp behind baseline single-head, within single-run noise.
+Conclusion: inconclusive. The BiGraphAttention design is substantially better than the generic nn.MultiheadAttention approach, confirming that pair-wise bias and gate are load-bearing components. A second run is needed to determine whether Hurink_vdata regression is systematic or stochastic. If systematic, the attention-weighted gate approximation may be losing critical per-pair information compared to the original exact gate.
