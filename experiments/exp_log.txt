@@ -74,3 +74,18 @@ Result (20260531_192704):
 - Overall mean gap over 8 groups: 11.11 -> 11.58 (+0.47 pp worse)
 Noise assessment: all regressions fall within historical training variance (SD2 40x10+mix range 0.90~8.68%, Brandimarte 24.28~37.71%, Hurink_rdata 10.83~12.98%). The +0.47 pp overall regression is not statistically distinguishable from noise in a single run. SD1 improved (-0.59 pp) and Hurink_edata improved (-0.41 pp).
 Conclusion: result is ambiguous — overall mean regressed slightly but within noise bounds; does not meet the revert threshold. Architecture change is theoretically sounder. A second independent training run is needed to confirm whether regression is real or stochastic.
+
+20260531_parallel_bigraph setting
+Baseline: decoupled projection (actor_dim=32, global_dim=16, hist_dim=64). BiGraphLayer used sequential (Gauss-Seidel) updates: O←M computed first, updated h_j immediately, then M←O used the already-updated h_j.
+Change: switch to parallel (Jacobi) updates. Both O←M and M←O aggregations are computed from the original h_j and h_m at the start of the layer; residuals are applied simultaneously after both aggregations are ready. P update still uses the post-update h_j and h_m.
+Hypothesis: in the sequential design, the M←O direction sees a h_j that has already absorbed machine information, making the two directions asymmetric and coupling their gradient signals. Parallel updates decouple the two message-passing directions so each operates on the same input state, producing cleaner, more symmetric gradient flow consistent with standard GNN message passing.
+Decision rule: compare greedy gaps against baseline 6.30/5.39, 15.80/0.90, 26.99/16.62/10.94/5.91; keep if overall mean improves without broad regression.
+
+20260531_parallel_bigraph result: inconclusive — SD2 regression needs second run to rule out noise
+Result (20260531_225227):
+- SD1 gap: 6.30/5.39 -> 5.58/4.93 (-0.72/-0.46 pp, better)
+- SD2 gap: 15.80/0.90 -> 18.50/5.00 (+2.70/+4.10 pp, worse)
+- BenchData gap: Brandimarte 26.99 -> 28.09, Hurink_edata 16.62 -> 15.82, Hurink_rdata 10.94 -> 9.49, Hurink_vdata 5.91 -> 4.73
+- Overall mean gap over 8 groups: 11.11 -> 11.52 (+0.41 pp worse)
+Noise assessment: SD2 regression is the main risk. SD2 40x10+mix has historically ranged 0.90~8.68% so 5.00% is within range; SD2 30x10+mix has reached 21.49% before so 18.50% is not clearly abnormal. BenchData Hurink shows consistent improvement across both architecture changes (edata -0.80 pp, rdata -1.45 pp, vdata -1.18 pp vs baseline), suggesting a genuine positive OOD signal. Incremental gain over decoupled-only run (rdata -3.12 pp) further supports that parallel updates add real value.
+Conclusion: inconclusive on SD2; positive on SD1 and Hurink. A second run is needed to determine whether SD2 30x10+mix stabilizes above 17% (systematic regression) or falls back to ~16% (noise). If noise, architecture is worth keeping; if systematic, a targeted fix for SD2 generalization is required.

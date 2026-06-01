@@ -32,7 +32,7 @@ class BiGraphLayer(nn.Module):
         B, J, d = h_j.shape
         M = h_m.size(1)
 
-        # ===================== O <- M =====================
+        # ===================== O <- M (aggregate only) =====================
         q = self.Wq_o(h_j).unsqueeze(2)  # [B,J,1,d]
         k = self.Wk_m(h_m).unsqueeze(1)  # [B,1,M,d]
         v = self.Wv_m(h_m).unsqueeze(1)  # [B,1,M,d]
@@ -42,14 +42,12 @@ class BiGraphLayer(nn.Module):
         score = score.masked_fill(dynamic_pair_mask, -1e9)
         alpha = F.softmax(score, dim=2)  # over M
         gate = 1.0 + torch.tanh(self.Wg(h_pair))  # [B,J,M,d]
-        msg = v * gate  # [B,J,M,d]
-        agg = (alpha.unsqueeze(-1) * msg).sum(dim=2)  # [B,J,d]
-        h_j = self.ln_j(h_j + agg)
+        agg_j = (alpha.unsqueeze(-1) * v * gate).sum(dim=2)  # [B,J,d]
 
-        # ===================== M <- O =====================
+        # ===================== M <- O (aggregate only, uses original h_j) =====================
         q2 = self.Wq_m(h_m).unsqueeze(1)  # [B,1,M,d]
-        k2 = self.Wk_o(h_j).unsqueeze(2)  # [B,J,1,d]
-        v2 = self.Wv_o(h_j).unsqueeze(2)  # [B,J,1,d]
+        k2 = self.Wk_o(h_j).unsqueeze(2)  # [B,J,1,d]  ← original h_j
+        v2 = self.Wv_o(h_j).unsqueeze(2)  # [B,J,1,d]  ← original h_j
 
         score2 = (q2 * k2).sum(-1) / math.sqrt(d)  # [B,J,M]
         score2 = score2 + self.wa_mo(h_pair).squeeze(-1)
@@ -62,9 +60,10 @@ class BiGraphLayer(nn.Module):
         alpha2 = alpha2.masked_fill(all_invalid_m, 0.0)
 
         gate2 = 1.0 + torch.tanh(self.Wg_mo(h_pair))  # [B,J,M,d]
-        msg2 = v2 * gate2
-        agg_m = (alpha2.unsqueeze(-1) * msg2).sum(dim=1)  # [B,M,d]
+        agg_m = (alpha2.unsqueeze(-1) * v2 * gate2).sum(dim=1)  # [B,M,d]
 
+        # ===================== Apply both updates in parallel =====================
+        h_j = self.ln_j(h_j + agg_j)
         h_m = self.ln_m(h_m + agg_m)
 
         # ===================== P <- (O, M, P) =====================
