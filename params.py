@@ -82,6 +82,11 @@ parser.add_argument('--sort_flag', type=str2bool, default=True,
 # args for inference mode
 parser.add_argument('--n_samples', type=int, default=1,
                     help='Number of stochastic rollouts per instance at test time. 1 = greedy (argmax).')
+parser.add_argument('--test_batch_size', type=int, default=0,
+                    help='How many same-shape instances to run through the network at once during '
+                         'greedy testing. 0 (default) = pack each size class in one batch (e.g. all '
+                         '100 of SD2 30x10 together). Set a positive number to cap the batch if GPU '
+                         'memory is tight. BenchData is always run single-instance regardless.')
 
 # args for selfplay
 parser.add_argument('--n_j', type=int, default=10, help='Number of jobs of the instance')

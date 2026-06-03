@@ -39,72 +39,117 @@ def load_baseline(data_name):
         return None
     return pd.read_csv(csv_path)
 
-def test_greedy_strategy(data_set, model_path, seed):
-    test_result_list = []
+def test_greedy_strategy(data_set, model_path, seed, batch_size=0):
+    """
+    Greedy (argmax) testing. Greedy is deterministic and each instance's forward
+    pass is independent, so running a whole batch of instances together yields
+    the exact same per-instance makespan as running them one by one — only much
+    faster (one large-batch forward instead of many batch-1 forwards). Finished
+    instances are skipped via the active-subset masking, mirroring validate_envs.
+
+    Per-instance wall-clock time is no longer meaningful under batching, so the
+    returned `time` column is the batch wall-clock amortized evenly per instance.
+    """
     setup_seed(seed)
-    ppo.policy.load_state_dict(torch.load(model_path, map_location='cuda', weights_only=True))
+    ppo.policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     ppo.policy.eval()
 
     env = FJSPEnv(device)
 
-    for i in tqdm(range(len(data_set[0])), file=sys.stdout, desc="progress", colour='blue'):
-        state = env.set_initial_data([data_set[0][i]], [data_set[1][i]])
-        h_hist = torch.zeros(1, ppo.policy.hist_dim, device=device)
+    job_lengths, op_pts = data_set[0], data_set[1]
+    n_total = len(job_lengths)
+    if batch_size is None or batch_size <= 0:
+        batch_size = n_total
+
+    makespans = np.empty(n_total, dtype=np.float64)
+    times = np.empty(n_total, dtype=np.float64)
+
+    # The env assumes a uniform (n_jobs, n_machines) across the batch (it infers
+    # both from the first instance), so group instances by shape before batching.
+    # SD1/SD2 collapse to a single group; BenchData splits into its size classes.
+    # Results are scattered back to the original index to keep baseline alignment.
+    shape_groups = {}
+    for idx in range(n_total):
+        key = (job_lengths[idx].shape[0], op_pts[idx].shape[1])
+        shape_groups.setdefault(key, []).append(idx)
+
+    chunks = [grp[s:s + batch_size]
+              for grp in shape_groups.values()
+              for s in range(0, len(grp), batch_size)]
+
+    for chunk in tqdm(chunks, file=sys.stdout, desc="progress", colour='blue'):
+        b = len(chunk)
+        state = env.set_initial_data([job_lengths[i] for i in chunk],
+                                     [op_pts[i] for i in chunk])
+        done = env.env_done.copy()
+        h_hist = torch.zeros(b, ppo.policy.hist_dim, device=device)
+
         t1 = time.time()
-        while True:
+        while not done.all():
             with torch.no_grad():
-                pi, _, h_hist = ppo.policy(
-                    state.fea_j_tensor,
-                    state.fea_m_tensor,
-                    state.fea_pairs_tensor,
-                    state.dynamic_pair_mask_tensor,
-                    h_hist,
+                batch_idx = ~torch.from_numpy(done)  # only feed unfinished instances
+                pi, _, h_new = ppo.policy(
+                    state.fea_j_tensor[batch_idx],
+                    state.fea_m_tensor[batch_idx],
+                    state.fea_pairs_tensor[batch_idx],
+                    state.dynamic_pair_mask_tensor[batch_idx],
+                    h_hist[batch_idx],
                 )
                 action_envs = torch.argmax(pi, dim=-1)
-                state, reward, done = env.step(actions=action_envs.cpu().numpy())
-                if done:
-                    break
+            h_hist[batch_idx] = h_new
+            state, _, done = env.step(actions=action_envs.cpu().numpy())
         t2 = time.time()
 
-        test_result_list.append([env.current_makespan[0], t2 - t1])
+        per_inst_time = (t2 - t1) / b  # amortized — see docstring
+        for k, orig_idx in enumerate(chunk):
+            makespans[orig_idx] = env.current_makespan[k]
+            times[orig_idx] = per_inst_time
 
-    return np.array(test_result_list)
+    return np.column_stack([makespans, times])
 
 
 def test_sampling_strategy(data_set, model_path, seed, n_samples):
-    """Run n_samples stochastic rollouts per instance; keep the best makespan."""
+    """
+    Run n_samples stochastic rollouts per instance; keep the best makespan.
+
+    The n_samples rollouts of one instance are run as a single parallel batch
+    (the instance is replicated n_samples times) instead of a Python loop, which
+    is far faster on GPU. Because the per-step sampling now draws for the whole
+    batch at once, the RNG stream differs from the old sequential version, so
+    individual makespans are not bit-identical to the previous seed — but the
+    procedure (n_samples i.i.d. rollouts, keep best) is statistically the same.
+    """
     test_result_list = []
     setup_seed(seed)
-    ppo.policy.load_state_dict(torch.load(model_path, map_location='cuda', weights_only=True))
+    ppo.policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     ppo.policy.eval()
 
     env = FJSPEnv(device)
 
     for i in tqdm(range(len(data_set[0])), file=sys.stdout, desc="progress", colour='blue'):
-        env.set_initial_data([data_set[0][i]], [data_set[1][i]])
+        state = env.set_initial_data([data_set[0][i]] * n_samples,
+                                     [data_set[1][i]] * n_samples)
+        done = env.env_done.copy()
+        h_hist = torch.zeros(n_samples, ppo.policy.hist_dim, device=device)
+
         t1 = time.time()
-        best_makespan = float('inf')
-
-        for _ in range(n_samples):
-            state = env.reset()
-            h_hist = torch.zeros(1, ppo.policy.hist_dim, device=device)
-            while True:
-                with torch.no_grad():
-                    pi, _, h_hist = ppo.policy(
-                        state.fea_j_tensor,
-                        state.fea_m_tensor,
-                        state.fea_pairs_tensor,
-                        state.dynamic_pair_mask_tensor,
-                        h_hist,
-                    )
-                    dist = torch.distributions.Categorical(pi)
-                    action_envs = dist.sample()
-                    state, _, done = env.step(actions=action_envs.cpu().numpy())
-                    if done:
-                        break
-            best_makespan = min(best_makespan, env.current_makespan[0])
-
+        while not done.all():
+            with torch.no_grad():
+                batch_idx = ~torch.from_numpy(done)
+                pi, _, h_new = ppo.policy(
+                    state.fea_j_tensor[batch_idx],
+                    state.fea_m_tensor[batch_idx],
+                    state.fea_pairs_tensor[batch_idx],
+                    state.dynamic_pair_mask_tensor[batch_idx],
+                    h_hist[batch_idx],
+                )
+                dist = torch.distributions.Categorical(pi)
+                action_envs = dist.sample()
+            h_hist[batch_idx] = h_new
+            state, _, done = env.step(actions=action_envs.cpu().numpy())
         t2 = time.time()
+
+        best_makespan = env.current_makespan.min()
         test_result_list.append([best_makespan, t2 - t1])
 
     return np.array(test_result_list)
@@ -149,7 +194,12 @@ def main(config):
                     save_result = test_sampling_strategy(data[0], model[0], config.seed_test, n_samples)
                 else:
                     # Greedy strategy is deterministic (argmax), so one run suffices.
-                    save_result = test_greedy_strategy(data[0], model[0], config.seed_test)
+                    # Synthetic sets (SD1/SD2) are size-uniform within each size class
+                    # and get batched; BenchData is a heterogeneous real benchmark whose
+                    # per-instance solve time is the reported metric, so keep it batch=1.
+                    greedy_bs = 1 if data[1] == 'BenchData' else config.test_batch_size
+                    save_result = test_greedy_strategy(data[0], model[0], config.seed_test,
+                                                       greedy_bs)
 
                 baseline_df = load_baseline(data[1])
 

@@ -15,6 +15,7 @@ build/
 venv/
 env_/
 .conda/
+.claude/
 
 # Training outputs
 runs/
