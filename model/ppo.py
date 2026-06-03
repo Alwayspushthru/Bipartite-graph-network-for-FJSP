@@ -61,33 +61,53 @@ class Memory:
         old_logp = torch.stack(self.log_probs, dim=0)             # [T, B]
         return fea_j, fea_m, fea_pairs, mask, action, reward, old_val, done, old_logp
 
-    def get_gae_advantages(self):
+    def get_gae_advantages(self, last_values=None):
         """
         Compute GAE advantages with done masking.
-        Normalizes per-env (over T) to match original behaviour.
+
+        The bootstrap value and the done flag are decoupled:
+          - `i == T - 1` only selects which "next value" to use
+            (last_values = V(s_T) for the final step, values[i+1] otherwise).
+          - `not_done` independently decides whether to bootstrap at all.
+        This makes truncated (non-terminal) rollouts correct: when an env has
+        not finished at step T-1, its return bootstraps from V(s_T). When every
+        env has terminated, last_values defaults to zeros (masked by not_done
+        anyway), recovering the previous no-bootstrap behaviour.
+
+        Normalizes per-env (over T). This is a deliberate, load-bearing design:
+        the reward is a makespan-LB decrement whose magnitude scales with the
+        instance's makespan, so per-env standardization gives the policy
+        gradient scale-invariance that is critical for OOD generalization to
+        benchmark data of very different scales (see exp_log 20260603). Global
+        normalization over T*B regressed all BenchData groups (Hurink_vdata
+        +12.92 pp) and was reverted.
         """
         reward_arr = torch.stack(self.reward_seq, dim=0)  # [T, B]
         values     = torch.stack(self.val_seq,    dim=0)  # [T, B]
         done_arr   = torch.stack(self.done_seq,   dim=0)  # [T, B]
 
         T, B = reward_arr.shape
+        if last_values is None:
+            last_values = torch.zeros(B, device=values.device)
+
         advantage = torch.zeros(B, device=values.device)
         advantage_seq = []
 
         for i in reversed(range(T)):
             not_done = (~done_arr[i]).float()  # [B]
-            if i == T - 1:
-                # Terminal step: no bootstrap
-                delta = reward_arr[i] - values[i]
-            else:
-                delta = reward_arr[i] + self.gamma * values[i + 1] * not_done - values[i]
+            next_value = last_values if i == T - 1 else values[i + 1]
+            delta = reward_arr[i] + self.gamma * next_value * not_done - values[i]
             advantage = delta + self.gamma * self.gae_lambda * not_done * advantage
             advantage_seq.insert(0, advantage)
 
         t_adv = torch.stack(advantage_seq, dim=0)  # [T, B]
-        v_target = t_adv + values                  # [T, B]
+        v_target = t_adv + values                  # [T, B] (raw advantages — keep
+                                                   # value targets unnormalized)
 
-        # Normalize per-env (over T dimension)
+        # Normalize per-env (over T dimension) — preserves scale-invariance for
+        # OOD generalization. Do NOT switch to global (T*B) normalization: it
+        # ties the gradient to the training reward scale and badly hurts OOD
+        # benchmark transfer (reverted, exp_log 20260603).
         t_adv = (t_adv - t_adv.mean(dim=0, keepdim=True)) / \
                 (t_adv.std(dim=0, keepdim=True) + 1e-8)
 
@@ -114,11 +134,11 @@ class PPO:
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
         self.V_loss_2  = nn.MSELoss()
 
-    def update(self, memory):
+    def update(self, memory, last_values=None):
         (fea_j_seq, fea_m_seq, fea_pairs_seq, mask_seq,
          action_seq, reward_seq, old_val_seq, done_seq, old_logp_seq) = memory.get_sequence_data()
 
-        t_adv, v_target = memory.get_gae_advantages()
+        t_adv, v_target = memory.get_gae_advantages(last_values)
 
         T, B = action_seq.shape
 

@@ -205,7 +205,7 @@ class BiGraphNetwork(nn.Module):
         ], dim=-1)  # [B, J*M, 3*actor_dim + 2*global_dim + hist_dim]
 
         logits = self.actor(candidate_feature).squeeze(-1)
-        logits[dynamic_pair_mask.reshape(B, -1)] = float('-inf')
+        logits = logits.masked_fill(dynamic_pair_mask.reshape(B, -1), float('-inf'))
         pi = F.softmax(logits, dim=1)
 
         value = self.critic(torch.cat([h_graph, h_hist_new], dim=-1)).squeeze(-1)

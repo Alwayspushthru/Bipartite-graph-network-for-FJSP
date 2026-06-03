@@ -147,7 +147,25 @@ class Trainer:
             mean_rewards_all_env = np.mean(ep_rewards)
             mean_makespan_all_env = np.mean(self.env.current_makespan)
 
-            loss_info = self.ppo.update(self.memory)
+            # Bootstrap value V(s_T) for any env not yet terminated (truncated
+            # rollout). Only non-done envs are fed to the network — a fully-done
+            # env has an all-True pair mask which would produce NaN logits.
+            # When every env has terminated (current default), last_values stays
+            # zero and the GAE recovers the no-bootstrap terminal behaviour.
+            with torch.no_grad():
+                last_values = torch.zeros(self.num_envs, device=device)
+                not_done = ~torch.from_numpy(done).to(device)
+                if not_done.any():
+                    _, v_last, _ = self.ppo.policy_old.forward(
+                        state.fea_j_tensor[not_done],
+                        state.fea_m_tensor[not_done],
+                        state.fea_pairs_tensor[not_done],
+                        state.dynamic_pair_mask_tensor[not_done],
+                        h[not_done],
+                    )
+                    last_values[not_done] = v_last
+
+            loss_info = self.ppo.update(self.memory, last_values)
             self.memory.clear_memory()
 
             if isinstance(loss_info, dict):
