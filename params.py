@@ -34,7 +34,7 @@ parser.add_argument('--seed_test', type=int, default=50, help='Seed for testing 
 parser.add_argument('--data_source', type=str, default='SD3', help='Suffix of test data')
 
 # args for network
-parser.add_argument('--fea_j_input_dim', type=int, default=7, help='Dimension of operation raw feature vectors')
+parser.add_argument('--fea_j_input_dim', type=int, default=8, help='Dimension of operation raw feature vectors')
 parser.add_argument('--fea_m_input_dim', type=int, default=5, help='Dimension of machine raw feature vectors')
 parser.add_argument('--fea_pair_input_dim', type=int, default=6, help='Dimension of pair raw feature vectors')
 

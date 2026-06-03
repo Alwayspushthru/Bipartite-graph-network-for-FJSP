@@ -35,7 +35,7 @@ class FJSPEnv:
         self.old_state = EnvState()
 
         # the dimension of operation raw features
-        self.op_fea_dim = 7
+        self.op_fea_dim = 8
         # the dimension of machine raw features
         self.mch_fea_dim = 5
         # the dimension of edge raw features
@@ -288,7 +288,8 @@ class FJSPEnv:
             [4] rem_work : 工件剩余工作量(未调度操作的平均加工时间之和)
             [5] p_mean : 平均加工时间
             [6] p_span : 加工时间跨度
-        :return: fea_j[B,J,6] 若其中有工件已完工那么用mask将对应特征置为0
+            [7] criticality : 关键路径松弛(1=在关键路径上, slack越小越关键)
+        :return: fea_j[B,J,8] 若其中有工件已完工那么用mask将对应特征置为0
         """
         feasible_mas = self.compatible_op[self.env_idxs[:, None], self.candidate] # 操作能被多少台机器加工
         feasible_mas_ratio = feasible_mas / self.number_of_machines
@@ -310,7 +311,14 @@ class FJSPEnv:
         )
         delay_ratio = raw_delay_ratio * (1.0 - feasible_mas_ratio)
 
-        self.fea_j = np.stack((feasible_mas_ratio, job_ready, rem_ops, rem_work, p_mean, p_span, delay_ratio), axis=2)
+        # 关键路径松弛：工件预计完工(头+尾) 与全局 makespan 下界的接近度
+        job_finish_lb = self.op_ct_lb[self.env_idxs[:, None], self.job_last_op_id]  # [B,J] 头+尾
+        op_ct_lb_visible = np.where(self.op_valid_mask, self.op_ct_lb, 0.0)
+        makespan_lb = np.max(op_ct_lb_visible, axis=1, keepdims=True)  # [B,1]
+        slack = makespan_lb - job_finish_lb  # >=0, 越小越关键
+        criticality = 1.0 - slack / (makespan_lb + 1e-8)  # 1=在关键路径上
+
+        self.fea_j = np.stack((feasible_mas_ratio, job_ready, rem_ops, rem_work, p_mean, p_span, delay_ratio, criticality), axis=2)
 
         mask = self.mask[:,:,None]
         self.fea_j = np.where(mask, 0, self.fea_j)
@@ -351,7 +359,7 @@ class FJSPEnv:
         n_compatible = np.sum(unscheduled_relation, axis=2, keepdims=True)  # (B,O,1)
         uniform_resp = np.where(unscheduled_relation, 1.0 / (n_compatible + 1e-8), 0.0)
         expect_workload = np.sum(uniform_resp * self.true_op_pt, axis=1)
-        
+
         idle = self.idle_acc
         utilization = (self.mch_free_time - self.idle_acc) / (self.mch_free_time + 1e-8)
         self.fea_m = np.stack((feasible_ops_norm, mach_ready, expect_workload, idle, utilization), axis=2)
