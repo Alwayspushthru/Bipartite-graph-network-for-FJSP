@@ -136,3 +136,21 @@ Conclusion: keep SD3 as the preferred online training distribution for now; trea
 
 20260602 尝试在GRU里面加入max pooling
 效果不好。revert
+
+20260603_activation_gelu setting
+Baseline: MLP 嵌入层使用 ReLU；Actor/Critic 隐藏层使用 tanh。
+Change: 统一将三处激活函数替换为 GELU。
+  - sub_layers.MLP.forward: F.relu → F.gelu（作用于 job/machine/pair 三个嵌入 MLP）
+  - sub_layers.Actor.activative: torch.tanh → F.gelu
+  - sub_layers.Critic.activative: torch.tanh → F.gelu
+Hypothesis: GELU 是 Transformer 类架构的标准激活函数，梯度比 ReLU 平滑（不存在 dying ReLU），比 tanh 饱和区间更窄（梯度消失风险更低）。统一激活函数还消除了 MLP 与 Actor/Critic 之间的不一致性，减少梯度信号混乱。
+Decision rule: compare greedy gaps against baseline 6.30/5.39, 15.80/0.90, 26.99/16.62/10.94/5.91; keep if overall mean improves without broad regression.
+
+20260603_activation_gelu result: inconclusive — SD2 regression needs second run to rule out noise
+Result (20260603_103448 ~ 20260603_105240):
+- SD1 gap: 6.30/5.39 -> 6.25/4.98 (-0.05/-0.41 pp, better)
+- SD2 gap: 15.80/0.90 -> 16.94/3.78 (+1.14/+2.88 pp, worse)
+- BenchData gap: Brandimarte 26.99 -> 26.47, Hurink_edata 16.62 -> 14.76, Hurink_rdata 10.94 -> 10.10, Hurink_vdata 5.91 -> 5.63
+- Overall mean gap over 8 groups: 11.11 -> 11.11 (±0.00 pp, unchanged)
+Noise assessment: SD2 40x10+mix regression (+2.88 pp, 0.90→3.78) is the main concern, but the historical range is 0.90~8.68% so 3.78% is within bounds. SD2 30x10+mix +1.14 pp is also within historical range (15.54~21.49%). SD1 40x10 improved (-0.41 pp); all four BenchData groups improved, with Hurink_edata showing the largest gain (-1.86 pp). Overall mean is statistically unchanged.
+Conclusion: inconclusive. SD1 and BenchData show consistent improvement; SD2 regressed but within historical noise. A second run is needed to determine whether SD2 regression is systematic. If the second run confirms SD2 is stable, GELU unification should be kept as the new baseline.

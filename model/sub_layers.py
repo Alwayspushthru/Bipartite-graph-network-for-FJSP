@@ -41,7 +41,7 @@ class MLP(nn.Module):
             # If MLP
             h = x
             for layer in range(self.num_layers - 1):
-                h = F.relu(self.linears[layer](h))
+                h = F.gelu(self.linears[layer](h))
             return self.linears[self.num_layers - 1](h)
 
 
@@ -60,7 +60,7 @@ class Actor(nn.Module):
         self.linear_or_not = True  # default is linear model
         self.num_layers = num_layers
 
-        self.activative = torch.tanh
+        self.activative = F.gelu
 
         if num_layers < 1:
             raise ValueError("number of layers should be positive!")
@@ -104,7 +104,7 @@ class Critic(nn.Module):
         self.linear_or_not = True  # default is linear model
         self.num_layers = num_layers
 
-        self.activative = torch.tanh
+        self.activative = F.gelu
 
         if num_layers < 1:
             raise ValueError("number of layers should be positive!")
