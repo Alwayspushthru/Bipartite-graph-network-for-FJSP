@@ -265,8 +265,7 @@ class FJSPEnv:
 
         self.step_count += 1
 
-        for i in range(self.number_of_envs):
-            self.env_done[i] = (self.step_count >= self.number_of_ops_per_env[i])
+        self.env_done = self.step_count >= self.number_of_ops_per_env
 
         # compute the reward : R_t = C_{LB}(s_{t}) - C_{LB}(s_{t+1})
         op_ct_lb_visible = np.where(self.op_valid_mask, self.op_ct_lb, 0)

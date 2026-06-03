@@ -152,6 +152,60 @@ class BiGraphNetwork(nn.Module):
         self.critic = Critic(config.num_mlp_layers_critic, critic_input_dim,
             config.hidden_dim_critic, 1)
 
+    def encode_no_recurrence(self, fea_j, fea_m, fea_pairs, dynamic_pair_mask):
+        h_j = self.job_mlp(fea_j)
+        h_m = self.mach_mlp(fea_m)
+        h_pair = self.pair_mlp(fea_pairs)
+
+        for layer in self.BiG_layers:
+            h_j, h_m, h_pair = layer(h_j, h_m, h_pair, dynamic_pair_mask)
+
+        a_j = self.actor_j_proj(h_j)
+        a_m = self.actor_m_proj(h_m)
+        a_pair = self.actor_pair_proj(h_pair)
+
+        g_j = self.global_j_proj(h_j)
+        g_m = self.global_m_proj(h_m)
+        g_pair = self.global_pair_proj(h_pair)
+
+        active_job_mask = ~dynamic_pair_mask.all(dim=-1)
+        active_mach_mask = ~dynamic_pair_mask.all(dim=1)
+        g_j_global = self.nonzero_averaging(g_j, active_job_mask)
+        g_m_global = self.nonzero_averaging(g_m, active_mach_mask)
+
+        valid_pair_mask = ~dynamic_pair_mask
+        g_pair_global = (g_pair * valid_pair_mask.unsqueeze(-1)).sum(dim=(1, 2)) \
+                        / valid_pair_mask.sum(dim=(1, 2)).clamp_min(1).unsqueeze(-1)
+
+        h_graph = torch.cat([g_j_global, g_m_global, g_pair_global], dim=-1)
+        return a_j, a_m, a_pair, g_j_global, g_m_global, h_graph
+
+    def decode_from_encoded(self, a_j, a_m, a_pair, g_j_global, g_m_global,
+                            h_graph, h_hist, dynamic_pair_mask):
+        N, J, M = dynamic_pair_mask.shape
+
+        a_j_exp = a_j.unsqueeze(2).expand(-1, -1, M, -1)
+        a_m_exp = a_m.unsqueeze(1).expand(-1, J, -1, -1)
+        g_j_global_exp = g_j_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
+        g_m_global_exp = g_m_global.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
+        h_hist_exp = h_hist.unsqueeze(1).unsqueeze(2).expand(-1, J, M, -1)
+
+        candidate_feature = torch.cat([
+            a_j_exp.reshape(N, J * M, self.actor_dim),
+            a_m_exp.reshape(N, J * M, self.actor_dim),
+            g_j_global_exp.reshape(N, J * M, self.global_dim),
+            g_m_global_exp.reshape(N, J * M, self.global_dim),
+            a_pair.reshape(N, J * M, self.actor_dim),
+            h_hist_exp.reshape(N, J * M, self.hist_dim),
+        ], dim=-1)
+
+        logits = self.actor(candidate_feature).squeeze(-1)
+        logits = logits.masked_fill(dynamic_pair_mask.reshape(N, -1), float('-inf'))
+        pi = F.softmax(logits, dim=1)
+
+        value = self.critic(torch.cat([h_graph, h_hist], dim=-1)).squeeze(-1)
+        return pi, value
+
     def forward(self, fea_j, fea_m, fea_pairs, dynamic_pair_mask, h_hist=None):
         """Single-step forward pass. Used during rollout and inference."""
         B, J, M = dynamic_pair_mask.shape
@@ -230,22 +284,33 @@ class BiGraphNetwork(nn.Module):
             value_seq: [T, B]
             h_last:    [B, hist_dim]
         """
-        T = fea_j_seq.size(0)
+        T, B, J, M = mask_seq.shape
+
+        def _flat(x):
+            return x.reshape(T * B, *x.shape[2:])
+
+        a_j, a_m, a_pair, g_j_global, g_m_global, h_graph = self.encode_no_recurrence(
+            _flat(fea_j_seq), _flat(fea_m_seq), _flat(fea_pairs_seq), _flat(mask_seq)
+        )
+        h_graph_seq = h_graph.reshape(T, B, -1)
+
         h = h0
-        pi_list, value_list = [], []
-
+        h_hist_list = []
         for t in range(T):
-            pi_t, value_t, h = self.forward(
-                fea_j_seq[t], fea_m_seq[t], fea_pairs_seq[t], mask_seq[t], h
-            )
-            pi_list.append(pi_t)
-            value_list.append(value_t)
-
-            # Reset hidden for envs that finished this step
+            h = self.gru_cell(h_graph_seq[t], h)
+            h_hist_list.append(h)
             if done_seq is not None:
                 h = h * (~done_seq[t]).float().unsqueeze(-1)
 
-        return torch.stack(pi_list, dim=0), torch.stack(value_list, dim=0), h
+        h_hist_seq = torch.stack(h_hist_list, dim=0)
+        h_last = h
+
+        pi, value = self.decode_from_encoded(
+            a_j, a_m, a_pair, g_j_global, g_m_global,
+            h_graph, _flat(h_hist_seq), _flat(mask_seq)
+        )
+
+        return pi.reshape(T, B, J * M), value.reshape(T, B), h_last
 
     def act(self, fea_j, fea_m, fea_pairs, candidate, dynamic_pair_mask, h_hist=None):
         pi, value, h_hist_new = self.forward(fea_j, fea_m, fea_pairs, dynamic_pair_mask, h_hist)
