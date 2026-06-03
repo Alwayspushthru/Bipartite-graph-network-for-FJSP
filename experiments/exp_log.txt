@@ -129,3 +129,10 @@ Result (20260601_140525 ~ 20260601_142341, num_heads=2, head_dim=64):
 Noise assessment: SD2 40x10+mix regression (+2.66 pp, 0.90→3.56) is likely noise — 0.90% was historically the best ever recorded and the range is 0.90~8.68%. Hurink_vdata regression (+2.06 pp, 5.91→7.97) is the main concern; this group has been relatively stable historically and the move is large enough to warrant verification. Improvements on SD1 30x10 (-0.62 pp), SD2 30x10+mix (-0.43 pp), Brandimarte (-1.23 pp), Hurink_edata (-0.58 pp) are encouraging and suggest the restored pair-wise bias is contributing positively.
 Comparison: overall mean 11.45% vs num_heads=4 generic MHA 12.40% — restoring pair bias and gate recovered most of the MHA regression. Still +0.34 pp behind baseline single-head, within single-run noise.
 Conclusion: inconclusive. The BiGraphAttention design is substantially better than the generic nn.MultiheadAttention approach, confirming that pair-wise bias and gate are load-bearing components. A second run is needed to determine whether Hurink_vdata regression is systematic or stochastic. If systematic, the attention-weighted gate approximation may be losing critical per-pair information compared to the original exact gate.
+
+20260602_data_source_comparison note
+Observation: training with the SD3 data distribution gives the best overall performance. Switching the training data source/distribution to the other available options causes some degree of regression across the evaluated results.
+Conclusion: keep SD3 as the preferred online training distribution for now; treat SD1/SD2-source training as ablations or diagnostic runs rather than the main training setup.
+
+20260602 尝试在GRU里面加入max pooling
+效果不好。revert
