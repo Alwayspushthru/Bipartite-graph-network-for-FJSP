@@ -1,3 +1,4 @@
 exp_id	timestamp	goal_id	hypothesis	primary_metric_name	primary_metric_value	baseline_value	delta	changes	budget	status	commit_sha
 exp_000	2026-06-04	indist_composite	greedy 同分布综合基线锚点(SD1/SD2 4 组等权平均,seed_train 300-309 共 10 次)	indist_composite_gap%	9.245	9.245	0.000	params.py 默认值;noise_floor_eval.py greedy	1000 updates x10 seeds	keep	0d39471
 exp_001	2026-06-04	indist_composite	lr=1e-4	indist_composite_gap%	26.858	12.572	+14.287	lr=1e-4	200upd x1 greedy	revert_A	
+exp_002	2026-06-04	indist_composite	lr=1e-4	indist_composite_gap%	13.789	8.546	+5.243	lr=1e-4	1000upd x1 greedy	revert_A	
