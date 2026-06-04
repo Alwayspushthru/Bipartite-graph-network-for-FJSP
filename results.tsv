@@ -3,3 +3,4 @@ exp_000	2026-06-04	indist_composite	greedy 同分布综合基线锚点(SD1/SD2 4
 exp_001	2026-06-04	indist_composite	lr=1e-4	indist_composite_gap%	26.858	12.572	+14.287	lr=1e-4	200upd x1 greedy	revert_A	
 exp_002	2026-06-04	indist_composite	lr=1e-4	indist_composite_gap%	13.789	8.546	+5.243	lr=1e-4	1000upd x1 greedy	revert_A	
 exp_003	2026-06-04	indist_composite	lr=1e-3	indist_composite_gap%	18.256	8.546	+9.709	lr=1e-3	1000upd x1 greedy	revert_A	
+exp_004	2026-06-04	indist_composite	eps_clip=0.1	indist_composite_gap%	27.126	8.546	+18.580	eps_clip=0.1	1000upd x1 greedy	revert_A	
