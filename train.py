@@ -62,7 +62,6 @@ class Trainer:
         self.seed_train = config.seed_train
         self.seed_test = config.seed_test
         setup_seed(self.seed_train)
-        setup_seed(self.seed_test)
 
         self.env = FJSPEnv(device) # 训练用的环境
         # validation data set
