@@ -154,6 +154,148 @@ def test_sampling_strategy(data_set, model_path, seed, n_samples):
 
     return np.array(test_result_list)
 
+def _log1mexp(a):
+    """
+    Numerically stable log(1 - exp(a)) for a <= 0 (a == 0 -> -inf).
+    Two-branch trick (Mächler 2012): use log(-expm1) when a is close to 0,
+    log1p(-exp) when a is very negative.
+    """
+    return torch.where(a > -0.6931471805599453,
+                       torch.log(-torch.expm1(a)),
+                       torch.log1p(-torch.exp(a)))
+
+
+def _conditional_gumbel_shift(g_phi, g_parent):
+    """
+    Shift independent child Gumbels `g_phi` (one Gumbel(phi_child) per action of a
+    parent) so that their per-parent max equals the parent's perturbed value
+    `g_parent` — the core of Kool et al. (2019) "Stochastic Beams and Where to
+    Find Them". This makes top-K over the whole perturbed frontier equivalent to
+    sampling K complete schedules *without replacement* from the policy.
+
+    g_phi:    [K, A]  independent Gumbel(phi_child)
+    g_parent: [K, 1]  parent perturbed value (the max the children must hit)
+    returns:  [K, A]  conditioned Gumbels with max_a == g_parent per row
+    """
+    z = g_phi.max(dim=1, keepdim=True).values                      # [K,1] per-parent max
+    v = g_parent - g_phi + _log1mexp(g_phi - z)                    # [K,A]
+    return g_parent - v.clamp(min=0) - torch.log1p(torch.exp(-v.abs()))
+
+
+def test_beam_strategy(data_set, model_path, seed, beam_width, stochastic=False):
+    """
+    Beam search over the construction process: keep `beam_width` partial schedules
+    at every step instead of one (greedy) or `n_samples` i.i.d. rollouts (sampling).
+
+    Each step:
+      1. forward all K beams -> pi [K, J*M];
+      2. score every child = parent_cum_logprob + log pi  -> [K, J*M];
+      3. keep the global top-K children (top-K over K*J*M);
+      4. reorder the env's dynamic state + GRU history by each child's parent,
+         then apply the chosen actions.
+
+    With `stochastic=False` this is deterministic beam: step 2 ranks by raw
+    cumulative log-prob, so the K beams collapse onto the policy's mode (good when
+    the policy is reliable/sharp, e.g. SD1; weak under OOD/high-flexibility data
+    where exploration matters).
+
+    With `stochastic=True` it is *stochastic beam search* (Gumbel-top-k): the
+    cumulative log-probs are perturbed with conditional Gumbel noise so that the
+    top-K frontier is exactly K schedules sampled WITHOUT REPLACEMENT. This keeps
+    beam's structured pruning but restores sampling's diversity (no duplicate
+    trajectories), and in expectation dominates i.i.d. Sampling×K.
+
+    Every beam of one instance schedules the same number of operations, so all
+    sequences share length — cumulative log-prob is a fair, length-unbiased rank
+    and no normalization is needed. The returned makespan is the *best* among the
+    K final complete schedules (the perturbation only steers the search; the
+    objective decides the winner).
+
+    Cost is the same order as Sampling×K: one batch-K forward per step.
+    """
+    test_result_list = []
+    setup_seed(seed)
+    ppo.policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    ppo.policy.eval()
+
+    env = FJSPEnv(device)
+    K = beam_width
+
+    for i in tqdm(range(len(data_set[0])), file=sys.stdout, desc="progress", colour='blue'):
+        state = env.set_initial_data([data_set[0][i]] * K, [data_set[1][i]] * K)
+        h_hist = torch.zeros(K, ppo.policy.hist_dim, device=device)
+        # Only beam 0 expands on the first step (all beams are identical copies),
+        # so the first selection yields K distinct children rather than K copies.
+        cum_logprob = torch.full((K,), float('-inf'), device=device)
+        cum_logprob[0] = 0.0
+        # Perturbed value G per beam (only used when stochastic). Root G is 0 WLOG:
+        # a single common ancestor's value shifts all leaves monotonically and so
+        # cannot change the top-K ordering.
+        g_beam = torch.full((K,), float('-inf'), device=device)
+        g_beam[0] = 0.0
+
+        t1 = time.time()
+        done = env.env_done.copy()
+        while not done.all():
+            with torch.no_grad():
+                pi, _, h_new = ppo.policy(
+                    state.fea_j_tensor,
+                    state.fea_m_tensor,
+                    state.fea_pairs_tensor,
+                    state.dynamic_pair_mask_tensor,
+                    h_hist,
+                )
+                A = pi.shape[1]
+                log_pi = torch.log(pi)  # masked actions -> 0 -> -inf, never selected
+                child_logprob = cum_logprob.unsqueeze(1) + log_pi  # [K, A] phi_child
+
+                if stochastic:
+                    # Independent Gumbel(phi_child), then condition so each parent's
+                    # child-max equals the parent's own perturbed value g_beam.
+                    u = torch.rand_like(child_logprob).clamp_min(1e-12)
+                    gumbel = -torch.log(-torch.log(u))
+                    g_phi = child_logprob + gumbel                  # [K, A]
+                    rank = _conditional_gumbel_shift(g_phi, g_beam.unsqueeze(1))
+                    # Masked actions and dead parents (all-children -inf) make the
+                    # shift produce NaN (from -inf − -inf); NaN poisons topk
+                    # ordering. Force every invalid child back to -inf.
+                    rank = torch.where(torch.isfinite(child_logprob), rank,
+                                       torch.full_like(rank, float('-inf')))
+                else:
+                    rank = child_logprob                            # rank by raw logprob
+
+                top_rank, top_flat = torch.topk(rank.reshape(-1), K)
+                parent = top_flat // A
+                action = top_flat % A
+
+                # Safety: if fewer than K valid children exist (tiny instances),
+                # topk may return -inf slots whose action is masked/illegal. Fill
+                # them with the best (always-finite) child to keep actions legal.
+                bad = ~torch.isfinite(top_rank)
+                if bad.any():
+                    parent = torch.where(bad, parent[0], parent)
+                    action = torch.where(bad, action[0], action)
+
+                # Carry forward the selected children's true cumulative log-prob
+                # (and perturbed value), gathered by the chosen (parent, action).
+                flat_logprob = child_logprob.reshape(-1)
+                cum_logprob = flat_logprob[parent * A + action]
+                if stochastic:
+                    g_beam = top_rank
+                    if bad.any():
+                        g_beam = torch.where(bad, top_rank[0], g_beam)
+
+            h_hist = h_new[parent]
+            env.reorder(parent.cpu().numpy())
+            state, _, done = env.step(actions=action.cpu().numpy())
+        t2 = time.time()
+
+        best_makespan = env.current_makespan.min()
+        test_result_list.append([best_makespan, t2 - t1])
+
+    return np.array(test_result_list)
+
+
 def main(config):
     setup_seed(config.seed_test)
     if not os.path.exists('./test_results'):
@@ -179,9 +321,18 @@ def main(config):
 
         for model in test_model:
             n_samples = config.n_samples
-            use_sampling = n_samples > 1
-            mode_str = f"Sampling×{n_samples}" if use_sampling else "Greedy"
-            model_prefix = f"Bgnn-S{n_samples}" if use_sampling else "Bgnn-G"
+            beam_width = config.beam_width
+            use_beam = beam_width > 1
+            use_sampling = (not use_beam) and n_samples > 1
+            if use_beam:
+                mode_str = f"{'SBeam' if config.beam_stochastic else 'Beam'}×{beam_width}"
+                model_prefix = f"Bgnn-{'SB' if config.beam_stochastic else 'B'}{beam_width}"
+            elif use_sampling:
+                mode_str = f"Sampling×{n_samples}"
+                model_prefix = f"Bgnn-S{n_samples}"
+            else:
+                mode_str = "Greedy"
+                model_prefix = "Bgnn-G"
 
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             save_path = save_direc + f'/{model[1]}_{model_prefix}_{timestamp}.xlsx'
@@ -190,7 +341,10 @@ def main(config):
                 print(f"Model name : {model[1]}")
                 print(f"data name: ./data/{data[1]}")
                 print(f"Test mode: {mode_str}")
-                if use_sampling:
+                if use_beam:
+                    save_result = test_beam_strategy(data[0], model[0], config.seed_test,
+                                                     beam_width, config.beam_stochastic)
+                elif use_sampling:
                     save_result = test_sampling_strategy(data[0], model[0], config.seed_test, n_samples)
                 else:
                     # Greedy strategy is deterministic (argmax), so one run suffices.

@@ -82,6 +82,15 @@ parser.add_argument('--sort_flag', type=str2bool, default=True,
 # args for inference mode
 parser.add_argument('--n_samples', type=int, default=1,
                     help='Number of stochastic rollouts per instance at test time. 1 = greedy (argmax).')
+parser.add_argument('--beam_width', type=int, default=1,
+                    help='Beam search width at test time. >1 keeps the K most probable partial '
+                         'schedules each step and reports the best final makespan. Takes precedence '
+                         'over n_samples. 1 (default) = disabled.')
+parser.add_argument('--beam_stochastic', type=str2bool, default=False,
+                    help='When beam_width>1, use stochastic beam search (Gumbel-top-k, i.e. '
+                         'sampling K schedules without replacement) instead of deterministic '
+                         'top-K. Adds sampling-style diversity to beam; helps on OOD/high-'
+                         'flexibility data (SD2/BenchData) where deterministic beam collapses.')
 parser.add_argument('--test_batch_size', type=int, default=0,
                     help='How many same-shape instances to run through the network at once during '
                          'greedy testing. 0 (default) = pack each size class in one batch (e.g. all '

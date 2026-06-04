@@ -280,6 +280,38 @@ class FJSPEnv:
         return self.state, np.array(reward), self.env_done
 
 
+    def reorder(self, perm):
+        """
+            Reindex all per-env *dynamic* state along the batch axis by `perm`.
+
+            Used by beam search: after scoring K beams and selecting the K best
+            children, each child continues from one parent beam, so every mutable
+            per-env array must be gathered by the parent indices before `step`.
+
+            `perm` is an int array of length number_of_envs with values in
+            [0, number_of_envs). Static per-instance arrays (op_pt, process_relation,
+            compatible_op/mch, op_mean_pt*, job_* ids, op_valid_mask, ...) are
+            identical across beams of one instance and are deliberately left
+            untouched. The EnvState tensors are rebuilt by the following `step`.
+        """
+        perm = np.asarray(perm)
+        self.current_makespan = self.current_makespan[perm]
+        self.op_ct = self.op_ct[perm]
+        self.mch_free_time = self.mch_free_time[perm]
+        self.candidate_free_time = self.candidate_free_time[perm]
+        self.true_op_ct = self.true_op_ct[perm]
+        self.true_candidate_free_time = self.true_candidate_free_time[perm]
+        self.true_mch_free_time = self.true_mch_free_time[perm]
+        self.candidate = self.candidate[perm]
+        self.unscheduled_op_mask = self.unscheduled_op_mask[perm]
+        self.idle_acc = self.idle_acc[perm]
+        self.mask = self.mask[perm]
+        self.env_done = self.env_done[perm]
+        self.op_ct_lb = self.op_ct_lb[perm]
+        self.max_endTime = self.max_endTime[perm]
+        self.candidate_pt = self.candidate_pt[perm]
+        self.candidate_process_relation = self.candidate_process_relation[perm]
+
     def construct_candidate_features(self):
         """
             [1] feasible_mas_ratio : 可用机器数/总机器数
