@@ -8,3 +8,4 @@ exp_005	2026-06-05	indist_composite	eps_clip=0.3	indist_composite_gap%	11.246	9.
 exp_006	2026-06-05	indist_composite	entloss_coef=0.001	indist_composite_gap%	11.880	8.546	+3.334	entloss_coef=0.001	1000upd x1 greedy	revert_A	
 exp_007	2026-06-05	indist_composite	hidden_dim_actor=32 hidden_dim_critic=32	indist_composite_gap%	9.028	9.245	-0.217	hidden_dim_actor=32 hidden_dim_critic=32	1000upd x5 greedy	revert	
 exp_008	2026-06-05	indist_composite	hidden_dim_actor=128 hidden_dim_critic=128	indist_composite_gap%	43.098	8.546	+34.552	hidden_dim_actor=128 hidden_dim_critic=128	1000upd x1 greedy	revert_A	
+exp_009	2026-06-05	indist_composite	num_bigraph_layers=1	indist_composite_gap%	10.364	9.245	+1.119	num_bigraph_layers=1	1000upd x5 greedy	revert	
