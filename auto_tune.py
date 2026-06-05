@@ -226,6 +226,11 @@ def main():
         if values is None:
             print(f'[skip] unknown dim {dim}'); continue
 
+        # The 3-strike stop (sheet 7) means "this search direction is dead", so
+        # the counter is per-dimension: each dim is a fresh hypothesis. Without
+        # this reset a multi-dim sweep would abort mid-batch on unrelated reverts.
+        no_improve = 0
+
         for value in values:
             flags = expand(dim, value)
             # skip no-op (value already the current base/default)
