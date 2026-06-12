@@ -29,7 +29,6 @@ parser.add_argument('--cover_flag', type=str2bool, default=True, help='Whether c
 # args for seed
 parser.add_argument('--seed_train', type=int, default=300, help='Seed for training')
 parser.add_argument('--seed_test', type=int, default=50, help='Seed for testing heuristics')
-
 # args for data load
 parser.add_argument('--data_source', type=str, default='SD3', help='Suffix of test data')
 
@@ -67,6 +66,10 @@ parser.add_argument('--minibatch_size', type=int, default=1024, help='Batch size
 # args for training log
 parser.add_argument('--log_dir', type=str, default='./runs', help='Root directory for TensorBoard logs')
 parser.add_argument('--run_name', type=str, default='exp', help='Run name for TensorBoard logs')
+parser.add_argument('--model_name', type=str, default='',
+                    help='Checkpoint filename (without .pth) saved under trained_network/. '
+                         'Empty = derive from size, e.g. 10x5 (overwrites the canonical file). '
+                         'Set a unique name to avoid clobbering, e.g. 10x5_baseline.')
 parser.add_argument('--log_interval', type=int, default=10, help='Interval (updates) for train/env logging')
 parser.add_argument('--use_tensorboard', type=str2bool, default=True, help='Whether to enable TensorBoard logging')
 

@@ -56,7 +56,7 @@ class Trainer:
 
         self.vali_data_path = f'./data/data_train_vali/{self.data_source}/{self.data_name}'
         self.test_data_path = f'./data/{self.data_source}/{self.data_name}'
-        self.model_name = f'{self.data_name}'
+        self.model_name = config.model_name or self.data_name
 
         # seed
         self.seed_train = config.seed_train
