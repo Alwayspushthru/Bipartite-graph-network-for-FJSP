@@ -235,7 +235,7 @@ class CaseGenerator:
         :param idx: The instance number
         """
         self.num_jobs = self.job_init
-        if not self.flag_same_opes:
+        if (not self.flag_same_opes) or (not self.nums_ope):
             self.nums_ope = [random.randint(self.opes_per_job_min, self.opes_per_job_max) for _ in range(self.num_jobs)]
         self.num_opes = sum(self.nums_ope)
         self.nums_option = [random.randint(self.mas_per_ope_min, self.mas_per_ope_max) for _ in range(self.num_opes)]
@@ -329,7 +329,7 @@ class SD3CaseGenerator:
         self.proctime_dev = 0.2
 
     def get_case(self):
-        if not self.flag_same_opes:
+        if (not self.flag_same_opes) or (not self.nums_ope):
             self.nums_ope = [random.randint(self.opes_per_job_min, self.opes_per_job_max) for _ in range(self.num_jobs)]
 
         self.num_opes = sum(self.nums_ope)
