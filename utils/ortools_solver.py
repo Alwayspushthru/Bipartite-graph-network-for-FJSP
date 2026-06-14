@@ -4,11 +4,70 @@ import time
 import os
 from tqdm import tqdm
 import sys
-from params import configs
-from data_utils import pack_data_from_config
 import collections
 
+# Make the project root importable regardless of the current working directory,
+# so this script can be launched as `python utils/ortools_solver.py`.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from params import configs
+from utils.data_utils import pack_data_from_config
+
+# Time limit (in seconds) given to OR-Tools for EACH instance.
+MAX_SOLVE_TIME = 1800
+
+# Number of parallel CP-SAT search workers per process.
+# Override via the OR_WORKERS environment variable, e.g. to run several
+# datasets in parallel with fewer workers each (12 cores -> 2 x 6).
+NUM_WORKERS = int(os.environ.get('OR_WORKERS', 8))
+
+# Human-readable names for CP-SAT solver status codes (stored numerically).
+_STATUS_NAMES = {
+    cp_model.OPTIMAL: 'OPTIMAL',
+    cp_model.FEASIBLE: 'FEASIBLE',
+    cp_model.INFEASIBLE: 'INFEASIBLE',
+    cp_model.MODEL_INVALID: 'MODEL_INVALID',
+    cp_model.UNKNOWN: 'UNKNOWN',
+}
+
 os.environ["CUDA_VISIBLE_DEVICES"] = configs.device_id
+
+
+def report_baseline_quality(data_name, results):
+    """
+        Report how tight the OR-Tools reference values are, so the gap computed
+        against them is trustworthy. Prints the proportion of instances proven
+        OPTIMAL and, for the remaining FEASIBLE ones, the residual MIP gap
+        (objective - best_bound) / objective.
+    :param data_name: name of the dataset
+    :param results: array of shape [N, 4] with columns
+        [makespan, solveTime, status_code, best_bound]
+    :return:
+    """
+    makespan = results[:, 0].astype(float)
+    status = results[:, 2].astype(int)
+    bound = results[:, 3].astype(float)
+    n = len(results)
+
+    n_opt = int(np.sum(status == cp_model.OPTIMAL))
+    # residual MIP gap only meaningful for feasible-but-not-proven-optimal instances
+    feasible_mask = (status == cp_model.FEASIBLE) & np.isfinite(makespan) & (makespan > 0)
+    gaps = (makespan[feasible_mask] - bound[feasible_mask]) / makespan[feasible_mask] * 100.0
+    n_nosol = int(np.sum(~np.isfinite(makespan)))
+
+    print("-" * 20 + f" Baseline quality: {data_name} " + "-" * 20)
+    print(f"instances              : {n}")
+    print(f"proven OPTIMAL         : {n_opt}/{n} ({100.0 * n_opt / n:.1f}%)")
+    if gaps.size > 0:
+        print(f"FEASIBLE (not proven)  : {gaps.size}, "
+              f"residual MIP gap mean {gaps.mean():.2f}% / max {gaps.max():.2f}%")
+    else:
+        print("FEASIBLE (not proven)  : 0")
+    if n_nosol > 0:
+        print(f"no solution found      : {n_nosol}")
+    print("-" * (62 + len(data_name)))
 
 
 def solve_instances(config):
@@ -22,14 +81,13 @@ def solve_instances(config):
     # p = psutil.Process()
     # p.cpu_affinity(range(config.low, config.high))
 
-    if not os.path.exists(f'./or_solution/{config.data_source}'):
-        os.makedirs(f'./or_solution/{config.data_source}')
+    # exist_ok=True so parallel processes can create the shared dir without racing
+    os.makedirs(f'./or_solution/{config.data_source}', exist_ok=True)
 
     data_list = pack_data_from_config(config.data_source, config.test_data)
 
     save_direc = f'./or_solution/{config.data_source}'
-    if not os.path.exists(save_direc):
-        os.makedirs(save_direc)
+    os.makedirs(save_direc, exist_ok=True)
 
     for data in data_list:
         dataset = data[0]
@@ -52,13 +110,16 @@ def solve_instances(config):
             print(f"left instances: dataset[{index}, {len(dataset[0])})")
             for k in tqdm(range(index, len(dataset[0])), file=sys.stdout, desc="progress", colour='blue'):
                 jobs, num_machines = matrix_to_the_format_for_solving(dataset[0][k], dataset[1][k])
-                solution, solveTime = fjsp_solver(jobs=jobs,
-                                                  num_machines=num_machines,
-                                                  time_limits=config.max_solve_time)
+                solution, solveTime, status, best_bound = fjsp_solver(jobs=jobs,
+                                                                      num_machines=num_machines,
+                                                                      time_limits=MAX_SOLVE_TIME)
                 tqdm.write(
-                    f"Instance {k + 1}, solution:{solution}, solveTime:{solveTime}, systemtime:{time.strftime('%m-%d %H:%M:%S')}")
+                    f"Instance {k + 1}, solution:{solution}, bound:{best_bound}, "
+                    f"status:{_STATUS_NAMES.get(status, status)}, solveTime:{solveTime}, "
+                    f"systemtime:{time.strftime('%m-%d %H:%M:%S')}")
+                # record: [makespan, solveTime, status_code, best_bound]
                 np.save(save_subpath + f'/solution_{data_name}_{str.zfill(str(k + 1), 3)}.npy',
-                        np.array([solution, solveTime]))
+                        np.array([solution, solveTime, status, best_bound]))
 
             print("load results...")
             results = []
@@ -66,8 +127,10 @@ def solve_instances(config):
                 solve_msg = np.load(save_subpath + f'/solution_{data_name}_{str.zfill(str(i + 1), 3)}.npy')
                 results.append(solve_msg)
 
-            np.save(save_path, np.array(results))
+            results = np.array(results)
+            np.save(save_path, results)
             print("successfully save results...")
+            report_baseline_quality(data_name, results)
 
 
 def matrix_to_the_format_for_solving(job_length, op_pt):
@@ -228,13 +291,24 @@ def fjsp_solver(jobs, num_machines, time_limits):
     # Solve model.
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limits
+    solver.parameters.num_search_workers = NUM_WORKERS
     solution_printer = SolutionPrinter()
 
     total1 = time.time()
     status = solver.Solve(model, solution_printer)
     total2 = time.time()
 
-    return solver.ObjectiveValue(), total2 - total1
+    # best_bound is the proven lower bound on the makespan: the true optimum
+    # lies in [best_bound, objective], so (objective - best_bound) / objective
+    # is the residual MIP gap that quantifies how tight this reference is.
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        objective = solver.ObjectiveValue()
+    else:
+        # no feasible solution found within the time limit
+        objective = float('inf')
+    best_bound = solver.BestObjectiveBound()
+
+    return objective, total2 - total1, status, best_bound
 
     # Print final solution.
     # for job_id in all_jobs:
@@ -280,4 +354,16 @@ class SolutionPrinter(cp_model.CpSolverSolutionCallback):
 
 
 if __name__ == '__main__':
+    # SD3 reference (baseline) values for gap computation:
+    # exactly solve SD3 datasets, within MAX_SOLVE_TIME seconds each.
+    #
+    # Run one dataset per process for parallelism, e.g. on a 12-core machine:
+    #   $env:OR_WORKERS=6; python utils\ortools_solver.py --test_data 30x10
+    #   $env:OR_WORKERS=6; python utils\ortools_solver.py --test_data 40x10
+    # If --test_data is not given, defaults to the two small SD3 datasets.
+    configs.data_source = 'SD3'
+    if configs.test_data == ['SD2']:  # params.py default => nothing was passed
+        configs.test_data = ['30x10', '40x10']
+    print(f"[OR-Tools] datasets={configs.test_data} | workers/process={NUM_WORKERS} "
+          f"| time_limit={MAX_SOLVE_TIME}s")
     solve_instances(config=configs)
