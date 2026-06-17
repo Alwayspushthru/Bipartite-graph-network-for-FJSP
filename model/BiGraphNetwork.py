@@ -13,12 +13,13 @@ class BiGraphAttention(nn.Module):
       1. pair-wise attention bias  — wa(h_pair) projected to H scalars per pair/head
       2. pair-wise gate            — Wg applied to attention-weighted pair features
     """
-    def __init__(self, d, num_heads=2):
+    def __init__(self, d, num_heads=2, ablation='none'):
         super().__init__()
         assert d % num_heads == 0
         self.num_heads = num_heads
         self.head_dim  = d // num_heads
         self.scale     = math.sqrt(self.head_dim)
+        self.ablation  = ablation
 
         self.Wq = nn.Linear(d, d, bias=False)
         self.Wk = nn.Linear(d, d, bias=False)
@@ -46,16 +47,24 @@ class BiGraphAttention(nn.Module):
         k = self.Wk(key_feat).reshape(B, Nk, H, Dh).transpose(1, 2)
         v = self.Wv(key_feat).reshape(B, Nk, H, Dh).transpose(1, 2)
 
-        # Scaled dot-product scores: [B, H, Nq, Nk]
-        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
+        if self.ablation == 'mean_agg':
+            # Ablation: replace learned attention with uniform mean over valid
+            # neighbors (drops Q.K scores and pair-bias entirely).
+            valid = (~mask).float().unsqueeze(1)                  # [B, 1, Nq, Nk]
+            alpha = valid / valid.sum(-1, keepdim=True).clamp_min(1.0)
+            alpha = alpha.expand(B, H, Nq, Nk)                    # shared across heads
+        else:
+            # Scaled dot-product scores: [B, H, Nq, Nk]
+            scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
 
-        # Pair-wise attention bias: [B, Nq, Nk, H] -> [B, H, Nq, Nk]
-        pair_bias = self.wa(h_pair).permute(0, 3, 1, 2)
-        scores = scores + pair_bias
+            # Pair-wise attention bias: [B, Nq, Nk, H] -> [B, H, Nq, Nk]
+            if self.ablation != 'no_pair_bias':
+                pair_bias = self.wa(h_pair).permute(0, 3, 1, 2)
+                scores = scores + pair_bias
 
-        # Mask invalid pairs then softmax
-        scores = scores.masked_fill(mask.unsqueeze(1), -1e9)
-        alpha = F.softmax(scores, dim=-1)  # [B, H, Nq, Nk]
+            # Mask invalid pairs then softmax
+            scores = scores.masked_fill(mask.unsqueeze(1), -1e9)
+            alpha = F.softmax(scores, dim=-1)  # [B, H, Nq, Nk]
 
         # Aggregate values: [B, H, Nq, Dh] -> [B, Nq, d]
         agg = torch.matmul(alpha, v).transpose(1, 2).reshape(B, Nq, d)
@@ -70,12 +79,12 @@ class BiGraphAttention(nn.Module):
 
 
 class BiGraphLayer(nn.Module):
-    def __init__(self, d, num_heads=2):
+    def __init__(self, d, num_heads=2, ablation='none'):
         super(BiGraphLayer, self).__init__()
-        self.attn_om = BiGraphAttention(d, num_heads)  # O <- M
+        self.attn_om = BiGraphAttention(d, num_heads, ablation)  # O <- M
         self.ln_j    = nn.LayerNorm(d)
 
-        self.attn_mo = BiGraphAttention(d, num_heads)  # M <- O
+        self.attn_mo = BiGraphAttention(d, num_heads, ablation)  # M <- O
         self.ln_m    = nn.LayerNorm(d)
 
         self.Wp   = nn.Linear(3 * d, d, bias=True)    # P <- (O, M, P)
@@ -118,9 +127,12 @@ class BiGraphNetwork(nn.Module):
         self.fea_embed_dim = 128
         self.mes_dim = 128
 
+        self.ablation = getattr(config, 'ablation', 'none')
+
         self.num_BiG_layers = config.num_bigraph_layers
         self.BiG_layers = nn.ModuleList(
-            [BiGraphLayer(d=self.mes_dim) for _ in range(self.num_BiG_layers)]
+            [BiGraphLayer(d=self.mes_dim, ablation=self.ablation)
+             for _ in range(self.num_BiG_layers)]
         )
 
         self.job_mlp = MLP(2, self.fea_j_input_dim, self.fea_embed_dim, self.mes_dim)
@@ -240,7 +252,11 @@ class BiGraphNetwork(nn.Module):
 
         if h_hist is None:
             h_hist = torch.zeros(B, self.hist_dim, device=fea_j.device)
-        h_hist_new = self.gru_cell(h_graph, h_hist)
+        if self.ablation == 'no_gru':
+            # Ablation: Markovian policy, no cross-step history.
+            h_hist_new = torch.zeros(B, self.hist_dim, device=fea_j.device)
+        else:
+            h_hist_new = self.gru_cell(h_graph, h_hist)
 
         # Broadcast for per-(job,machine) actor input
         a_j_exp        = a_j.unsqueeze(2).expand(-1, -1, M, -1)
@@ -294,16 +310,21 @@ class BiGraphNetwork(nn.Module):
         )
         h_graph_seq = h_graph.reshape(T, B, -1)
 
-        h = h0
-        h_hist_list = []
-        for t in range(T):
-            h = self.gru_cell(h_graph_seq[t], h)
-            h_hist_list.append(h)
-            if done_seq is not None:
-                h = h * (~done_seq[t]).float().unsqueeze(-1)
+        if self.ablation == 'no_gru':
+            # Ablation: Markovian policy, no cross-step history.
+            h_hist_seq = torch.zeros(T, B, self.hist_dim, device=h_graph.device)
+            h_last = torch.zeros(B, self.hist_dim, device=h_graph.device)
+        else:
+            h = h0
+            h_hist_list = []
+            for t in range(T):
+                h = self.gru_cell(h_graph_seq[t], h)
+                h_hist_list.append(h)
+                if done_seq is not None:
+                    h = h * (~done_seq[t]).float().unsqueeze(-1)
 
-        h_hist_seq = torch.stack(h_hist_list, dim=0)
-        h_last = h
+            h_hist_seq = torch.stack(h_hist_list, dim=0)
+            h_last = h
 
         pi, value = self.decode_from_encoded(
             a_j, a_m, a_pair, g_j_global, g_m_global,

@@ -39,6 +39,14 @@ parser.add_argument('--fea_pair_input_dim', type=int, default=6, help='Dimension
 
 parser.add_argument('--num_bigraph_layers', type=int, default=2)
 
+# args for ablation study (single switch; one variant per run, 'none' = full model)
+parser.add_argument('--ablation', type=str, default='none',
+                    choices=['none', 'mean_agg', 'no_pair_bias', 'no_gru'],
+                    help='Ablate one core design component. '
+                         'mean_agg: replace bipartite attention with uniform mean aggregation; '
+                         'no_pair_bias: drop edge-feature modulation of attention scores; '
+                         'no_gru: zero out the cross-step GRU history (Markovian policy).')
+
 parser.add_argument('--num_mlp_layers_actor', type=int, default=3, help='Actor MLP layers')
 parser.add_argument('--hidden_dim_actor', type=int, default=64, help='Hidden dimension for actor')
 parser.add_argument('--num_mlp_layers_critic', type=int, default=3, help='Critic MLP layers')
