@@ -19,7 +19,13 @@ from utils.data_utils import CaseGenerator,SD3CaseGenerator
 
 str_time = time.strftime("%m%d_%H%M", time.localtime(time.time()))
 os.environ["CUDA_VISIBLE_DEVICES"] = configs.device_id
-device = torch.device(configs.device)
+
+requested_device = configs.device
+if requested_device.startswith("cuda") and not torch.cuda.is_available():
+    print("CUDA is unavailable; falling back to CPU.")
+    requested_device = "cpu"
+device = torch.device(requested_device)
+configs.device = device.type
 
 class Trainer:
     def __init__(self, config):
@@ -44,10 +50,7 @@ class Trainer:
             os.makedirs(f'./trained_network/{self.data_source}')
 
         torch.set_default_dtype(torch.float32)
-        if torch.cuda.is_available():
-            torch.set_default_device('cuda')
-        else:
-            torch.set_default_device('cpu')
+        torch.set_default_device(device)
 
         if self.data_source == 'SD2':
             self.data_name = f'{self.n_j}x{self.n_m}{strToSuffix(config.data_suffix)}'
