@@ -47,6 +47,17 @@ parser.add_argument('--ablation', type=str, default='none',
                          'no_pair_bias: drop edge-feature modulation of attention scores; '
                          'no_gru: zero out the cross-step GRU history (Markovian policy).')
 
+# reviewer-revision experiments (orthogonal to the original ablation study)
+parser.add_argument('--revision_variant', type=str, default='b0',
+                    choices=['b0', 'q', 'l', 'g', 'r'],
+                    help='Reviewer-revision configuration. '
+                         'b0: frozen baseline; q: gated waiting-operation summary; '
+                         'l: explicit queue/load pair features; '
+                         'g: graph-conditioned history update gate; '
+                         'r: objective-preserving load-aware reward shaping.')
+parser.add_argument('--reward_shaping_beta', type=float, default=0.1,
+                    help='Potential-based shaping coefficient used only by revision_variant=r.')
+
 parser.add_argument('--num_mlp_layers_actor', type=int, default=3, help='Actor MLP layers')
 parser.add_argument('--hidden_dim_actor', type=int, default=64, help='Hidden dimension for actor')
 parser.add_argument('--num_mlp_layers_critic', type=int, default=3, help='Critic MLP layers')

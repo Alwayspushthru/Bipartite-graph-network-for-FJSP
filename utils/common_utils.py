@@ -33,7 +33,7 @@ def clone_state_tensors(state: EnvState) -> Dict[str, torch.Tensor]:
     """Create a CPU clone of the tensors required to rebuild ``EnvState``."""
 
     tensor_fields = [
-        "fea_j_tensor", "fea_m_tensor", "fea_pairs_tensor",
+        "fea_j_tensor", "fea_m_tensor", "fea_pairs_tensor", "fea_waiting_tensor",
         "candidate_tensor", "job_mask_tensor", "dynamic_pair_mask_tensor"
     ]
     snapshot: Dict[str, torch.Tensor] = {}

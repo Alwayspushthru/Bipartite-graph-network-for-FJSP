@@ -58,7 +58,6 @@ class Trainer:
             self.data_name = f'{self.n_j}x{self.n_m}'
 
         self.vali_data_path = f'./data/data_train_vali/{self.data_source}/{self.data_name}'
-        self.test_data_path = f'./data/{self.data_source}/{self.data_name}'
         self.model_name = config.model_name or self.data_name
 
         # seed
@@ -67,11 +66,10 @@ class Trainer:
         setup_seed(self.seed_train)
         setup_seed(self.seed_test)
 
-        self.env = FJSPEnv(device) # 训练用的环境
+        self.env = FJSPEnv(device, config.revision_variant, config.reward_shaping_beta) # 训练用的环境
         # validation data set
-        self.test_data = load_data_from_files(self.test_data_path) # 测试用的数据
         vali_data = load_data_from_files(self.vali_data_path) # 验证用的数据
-        self.vali_env = FJSPEnv(device) # 验证用的环境
+        self.vali_env = FJSPEnv(device, config.revision_variant, config.reward_shaping_beta) # 验证用的环境
         self.vali_env.set_initial_data(vali_data[0], vali_data[1]) # 在环境中初始化数据
 
         self.ppo = PPO_initialize()
@@ -124,6 +122,7 @@ class Trainer:
                         state.fea_j_tensor,
                         state.fea_m_tensor,
                         state.fea_pairs_tensor,
+                        state.fea_waiting_tensor,
                         state.candidate_tensor,
                         state.dynamic_pair_mask_tensor,
                         h,
@@ -163,6 +162,7 @@ class Trainer:
                         state.fea_j_tensor[not_done],
                         state.fea_m_tensor[not_done],
                         state.fea_pairs_tensor[not_done],
+                        state.fea_waiting_tensor[not_done],
                         state.dynamic_pair_mask_tensor[not_done],
                         h[not_done],
                     )
@@ -252,6 +252,7 @@ class Trainer:
                     state.fea_j_tensor[batch_idx],
                     state.fea_m_tensor[batch_idx],
                     state.fea_pairs_tensor[batch_idx],
+                    state.fea_waiting_tensor[batch_idx],
                     state.candidate_tensor[batch_idx],
                     state.dynamic_pair_mask_tensor[batch_idx],
                     h_hist[batch_idx],

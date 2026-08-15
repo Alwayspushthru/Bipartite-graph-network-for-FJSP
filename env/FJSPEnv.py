@@ -12,15 +12,17 @@ class EnvState:
     fea_j_tensor: torch.Tensor = None
     fea_m_tensor: torch.Tensor = None
     fea_pairs_tensor: torch.Tensor = None
+    fea_waiting_tensor: torch.Tensor = None
 
     candidate_tensor: torch.Tensor = None
     job_mask_tensor: torch.Tensor = None
     dynamic_pair_mask_tensor: torch.Tensor = None
 
-    def update(self, fea_j, fea_m, fea_pairs, candidate, job_mask_tensor, dynamic_pair_mask, device):
+    def update(self, fea_j, fea_m, fea_pairs, fea_waiting, candidate, job_mask_tensor, dynamic_pair_mask, device):
         self.fea_j_tensor = torch.from_numpy(np.copy(fea_j)).float().to(device) # operation feature
         self.fea_m_tensor = torch.from_numpy(np.copy(fea_m)).float().to(device)
         self.fea_pairs_tensor = torch.from_numpy(np.copy(fea_pairs)).float().to(device)
+        self.fea_waiting_tensor = torch.from_numpy(np.copy(fea_waiting)).float().to(device)
 
         self.candidate_tensor = torch.from_numpy(np.copy(candidate)).to(device)
         self.job_mask_tensor = torch.from_numpy(np.copy(job_mask_tensor)).to(device)
@@ -31,7 +33,7 @@ class FJSPEnv:
         Environment that builds the local scheduling state from synthetic data.
         let E/N/J/M denote the number of envs/operations/jobs/machines
     """
-    def __init__(self, device):
+    def __init__(self, device, revision_variant='b0', reward_shaping_beta=0.1):
         self.old_state = EnvState()
 
         # the dimension of operation raw features
@@ -42,6 +44,8 @@ class FJSPEnv:
         self.edge_fea_dim = 6
 
         self.device = device
+        self.revision_variant = revision_variant
+        self.reward_shaping_beta = reward_shaping_beta
 
     def set_initial_data(self, job_length_list, op_pt_list):
         self.number_of_envs = len(job_length_list)  # batch_size
@@ -110,6 +114,18 @@ class FJSPEnv:
             [np.zeros((self.number_of_envs, 1)), np.cumsum(self.op_mean_pt, axis=1)],
             axis=1,
         )  # [B, O_max+1]
+        flexibility = self.compatible_op / self.number_of_machines
+        self.op_flexibility_cumsum = np.concatenate(
+            [np.zeros((self.number_of_envs, 1)), np.cumsum(flexibility, axis=1)],
+            axis=1,
+        )
+        self.job_total_expected_work = (
+            self.op_mean_pt_cumsum[self.env_idxs[:, None], self.job_last_op_id + 1]
+            - self.op_mean_pt_cumsum[self.env_idxs[:, None], self.job_first_op_id]
+        )
+        self.total_expected_work = np.sum(
+            np.where(self.op_valid_mask, self.op_mean_pt, 0.0), axis=1
+        )
 
         # the estimated lower bound of complete time of operations
         self.op_ct_lb = copy.deepcopy(self.op_min_pt) # 每个操作的估计完工时间
@@ -126,12 +142,13 @@ class FJSPEnv:
         self.construct_candidate_features() # [B,J,8]
         self.construct_mch_features()
         self.construct_pair_features()
+        self.construct_waiting_features()
 
         # shape reward
         self.init_quality = np.max(self.op_ct_lb, axis=1)
         self.max_endTime = self.init_quality
 
-        self.old_state.update(self.fea_j,self.fea_m,self.fea_pairs,self.candidate,self.mask,
+        self.old_state.update(self.fea_j,self.fea_m,self.fea_pairs,self.fea_waiting,self.candidate,self.mask,
                               self.candidate_process_relation, self.device)
 
         self.old_op_ct_lb = np.copy(self.op_ct_lb)
@@ -185,6 +202,8 @@ class FJSPEnv:
         self.unscheduled_op_mask = np.zeros((self.number_of_envs, self.number_of_ops), dtype=bool)
         self.unscheduled_op_mask[self.op_valid_mask] = True
         self.idle_acc = np.zeros((self.number_of_envs, self.number_of_machines))  # 机器m的空闲时间累计
+        self.machine_assigned_count = np.zeros((self.number_of_envs, self.number_of_machines))
+        self.shaping_potential = np.zeros(self.number_of_envs)
 
         # mask[i,j] : whether the jth job of ith env is scheduled (have no unscheduled operations)
         self.mask = np.full(shape=(self.number_of_envs, self.number_of_jobs), fill_value=0, dtype=bool)
@@ -233,6 +252,7 @@ class FJSPEnv:
 
         idle_inc = np.maximum(0.0, chosen_op_st - self.mch_free_time[active_idx, active_machine])
         self.idle_acc[active_idx, active_machine] += idle_inc
+        self.machine_assigned_count[active_idx, active_machine] += 1
 
         self.candidate_free_time[active_idx, active_job] = self.op_ct[active_idx, chosen_op]
         self.mch_free_time[active_idx, active_machine] = self.op_ct[active_idx, chosen_op]
@@ -262,6 +282,7 @@ class FJSPEnv:
         self.construct_candidate_features()
         self.construct_mch_features()
         self.construct_pair_features()
+        self.construct_waiting_features()
 
         self.step_count += 1
 
@@ -272,9 +293,18 @@ class FJSPEnv:
         reward = self.max_endTime - np.max(op_ct_lb_visible, axis=1)
         self.max_endTime = np.max(op_ct_lb_visible, axis=1)
 
+        if self.revision_variant == 'r':
+            progress = np.minimum(self.step_count / self.number_of_ops_per_env, 1.0)
+            processing_load = np.maximum(0.0, self.mch_free_time - self.idle_acc)
+            load_fraction = processing_load / (processing_load.sum(axis=1, keepdims=True) + 1e-8)
+            imbalance = np.std(load_fraction, axis=1)
+            new_potential = -4.0 * progress * (1.0 - progress) * imbalance
+            reward = reward + self.reward_shaping_beta * (new_potential - self.shaping_potential)
+            self.shaping_potential = new_potential
+
         true_candidate = np.where(self.mask, -1, self.candidate)
 
-        self.state.update(self.fea_j, self.fea_m, self.fea_pairs, true_candidate, self.mask,
+        self.state.update(self.fea_j, self.fea_m, self.fea_pairs, self.fea_waiting, true_candidate, self.mask,
                           self.candidate_process_relation, self.device)
 
         return self.state, np.array(reward), self.env_done
@@ -305,6 +335,8 @@ class FJSPEnv:
         self.candidate = self.candidate[perm]
         self.unscheduled_op_mask = self.unscheduled_op_mask[perm]
         self.idle_acc = self.idle_acc[perm]
+        self.machine_assigned_count = self.machine_assigned_count[perm]
+        self.shaping_potential = self.shaping_potential[perm]
         self.mask = self.mask[perm]
         self.env_done = self.env_done[perm]
         self.op_ct_lb = self.op_ct_lb[perm]
@@ -433,4 +465,35 @@ class FJSPEnv:
 
         pt_out = np.where(mask,pt,0)
 
-        self.fea_pairs = np.stack((pt_out, start, wait_job,wait_mach, ratio_m, ratio_op),axis=3,)
+        pair_features = [pt_out, start, wait_job, wait_mach, ratio_m, ratio_op]
+        if self.revision_variant == 'l':
+            queue_length = self.machine_assigned_count / self.number_of_ops_per_env[:, None]
+            processing_load = np.maximum(0.0, self.mch_free_time - self.idle_acc)
+            cumulative_load = processing_load / (self.total_expected_work[:, None] + 1e-8)
+            pair_shape = (self.number_of_envs, self.number_of_jobs, self.number_of_machines)
+            pair_features.extend([
+                np.broadcast_to(queue_length[:, None, :], pair_shape),
+                np.broadcast_to(cumulative_load[:, None, :], pair_shape),
+            ])
+        self.fea_pairs = np.stack(pair_features, axis=3)
+
+    def construct_waiting_features(self):
+        """Fixed-size summaries of operations after the current candidate."""
+        waiting_count = np.maximum(0, self.job_last_op_id - self.candidate)
+        waiting_start = np.minimum(self.candidate + 1, self.job_last_op_id + 1)
+        waiting_work = (
+            self.op_mean_pt_cumsum[self.env_idxs[:, None], self.job_last_op_id + 1]
+            - self.op_mean_pt_cumsum[self.env_idxs[:, None], waiting_start]
+        )
+        waiting_flex_sum = (
+            self.op_flexibility_cumsum[self.env_idxs[:, None], self.job_last_op_id + 1]
+            - self.op_flexibility_cumsum[self.env_idxs[:, None], waiting_start]
+        )
+        count_ratio = waiting_count / self.job_length
+        workload_ratio = waiting_work / (self.job_total_expected_work + 1e-8)
+        mean_flexibility = waiting_flex_sum / (waiting_count + 1e-8)
+        mean_processing_time = waiting_work / (waiting_count + 1e-8)
+        self.fea_waiting = np.stack(
+            (count_ratio, workload_ratio, mean_flexibility, mean_processing_time), axis=2
+        )
+        self.fea_waiting = np.where(self.mask[:, :, None], 0.0, self.fea_waiting)

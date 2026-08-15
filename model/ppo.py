@@ -14,6 +14,7 @@ class Memory:
         self.fea_j_seq = []
         self.fea_m_seq = []
         self.fea_pairs_seq = []
+        self.fea_waiting_seq = []
         self.candidate_seq = []
         self.job_mask_seq = []
         self.dynamic_pair_mask_seq = []
@@ -28,6 +29,7 @@ class Memory:
         self.fea_j_seq.append(state.fea_j_tensor)
         self.fea_m_seq.append(state.fea_m_tensor)
         self.fea_pairs_seq.append(state.fea_pairs_tensor)
+        self.fea_waiting_seq.append(state.fea_waiting_tensor)
         self.candidate_seq.append(state.candidate_tensor)
         self.job_mask_seq.append(state.job_mask_tensor)
         self.dynamic_pair_mask_seq.append(state.dynamic_pair_mask_tensor)
@@ -36,6 +38,7 @@ class Memory:
         del self.fea_j_seq[:]
         del self.fea_m_seq[:]
         del self.fea_pairs_seq[:]
+        del self.fea_waiting_seq[:]
         del self.candidate_seq[:]
         del self.job_mask_seq[:]
         del self.dynamic_pair_mask_seq[:]
@@ -53,13 +56,14 @@ class Memory:
         fea_j    = torch.stack(self.fea_j_seq, dim=0)             # [T, B, J, Fj]
         fea_m    = torch.stack(self.fea_m_seq, dim=0)             # [T, B, M, Fm]
         fea_pairs = torch.stack(self.fea_pairs_seq, dim=0)        # [T, B, J, M, Fp]
+        fea_waiting = torch.stack(self.fea_waiting_seq, dim=0)    # [T, B, J, 4]
         mask     = torch.stack(self.dynamic_pair_mask_seq, dim=0) # [T, B, J, M]
         action   = torch.stack(self.action_seq, dim=0)            # [T, B]
         reward   = torch.stack(self.reward_seq, dim=0)            # [T, B]
         old_val  = torch.stack(self.val_seq, dim=0)               # [T, B]
         done     = torch.stack(self.done_seq, dim=0)              # [T, B]
         old_logp = torch.stack(self.log_probs, dim=0)             # [T, B]
-        return fea_j, fea_m, fea_pairs, mask, action, reward, old_val, done, old_logp
+        return fea_j, fea_m, fea_pairs, fea_waiting, mask, action, reward, old_val, done, old_logp
 
     def get_gae_advantages(self, last_values=None):
         """
@@ -135,7 +139,7 @@ class PPO:
         self.V_loss_2  = nn.MSELoss()
 
     def update(self, memory, last_values=None):
-        (fea_j_seq, fea_m_seq, fea_pairs_seq, mask_seq,
+        (fea_j_seq, fea_m_seq, fea_pairs_seq, fea_waiting_seq, mask_seq,
          action_seq, reward_seq, old_val_seq, done_seq, old_logp_seq) = memory.get_sequence_data()
 
         t_adv, v_target = memory.get_gae_advantages(last_values)
@@ -152,7 +156,7 @@ class PPO:
 
             # Recompute full sequence with current policy parameters (true BPTT)
             pi_seq, value_seq, _ = self.policy.forward_sequence(
-                fea_j_seq, fea_m_seq, fea_pairs_seq, mask_seq, h0, done_seq
+                fea_j_seq, fea_m_seq, fea_pairs_seq, fea_waiting_seq, mask_seq, h0, done_seq
             )  # [T, B, J*M], [T, B]
 
             dist    = torch.distributions.Categorical(pi_seq)

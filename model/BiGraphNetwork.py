@@ -122,7 +122,8 @@ class BiGraphNetwork(nn.Module):
 
         self.fea_j_input_dim = config.fea_j_input_dim  # 7
         self.fea_m_input_dim = config.fea_m_input_dim  # 5
-        self.fea_pairs_input_dim = config.fea_pair_input_dim  # 6
+        self.revision_variant = getattr(config, 'revision_variant', 'b0')
+        self.fea_pairs_input_dim = 8 if self.revision_variant == 'l' else config.fea_pair_input_dim
 
         self.fea_embed_dim = 128
         self.mes_dim = 128
@@ -138,6 +139,10 @@ class BiGraphNetwork(nn.Module):
         self.job_mlp = MLP(2, self.fea_j_input_dim, self.fea_embed_dim, self.mes_dim)
         self.mach_mlp = MLP(2, self.fea_m_input_dim, self.fea_embed_dim, self.mes_dim)
         self.pair_mlp = MLP(2, self.fea_pairs_input_dim, self.fea_embed_dim, self.mes_dim)
+        if self.revision_variant == 'q':
+            self.waiting_mlp = MLP(2, 4, self.fea_embed_dim, self.mes_dim)
+            self.waiting_gate = nn.Linear(2 * self.mes_dim, self.mes_dim)
+            self.waiting_ln = nn.LayerNorm(self.mes_dim)
 
         # Actor path: high-resolution local features for per-(job,machine) discrimination
         self.actor_dim = 32
@@ -154,6 +159,14 @@ class BiGraphNetwork(nn.Module):
         # GRU input: 3 global means (each global_dim) → [B, 3*global_dim]
         self.hist_dim = 64
         self.gru_cell = nn.GRUCell(3 * self.global_dim, self.hist_dim)
+        if self.revision_variant == 'g':
+            self.urgency_gate = nn.Sequential(
+                nn.Linear(3 * self.global_dim, self.hist_dim),
+                nn.GELU(),
+                nn.Linear(self.hist_dim, self.hist_dim),
+                nn.Sigmoid(),
+            )
+            nn.init.constant_(self.urgency_gate[2].bias, 2.0)
 
         # Actor: local_j + local_m + global_j + global_m + local_pair + h_hist
         actor_input_dim = 3 * self.actor_dim + 2 * self.global_dim + self.hist_dim
@@ -164,8 +177,23 @@ class BiGraphNetwork(nn.Module):
         self.critic = Critic(config.num_mlp_layers_critic, critic_input_dim,
             config.hidden_dim_critic, 1)
 
-    def encode_no_recurrence(self, fea_j, fea_m, fea_pairs, dynamic_pair_mask):
+    def _embed_jobs(self, fea_j, fea_waiting):
         h_j = self.job_mlp(fea_j)
+        if self.revision_variant == 'q':
+            h_wait = self.waiting_mlp(fea_waiting)
+            gate = torch.sigmoid(self.waiting_gate(torch.cat([h_j, h_wait], dim=-1)))
+            h_j = self.waiting_ln(h_j + gate * h_wait)
+        return h_j
+
+    def _update_history(self, h_graph, h_hist):
+        h_candidate = self.gru_cell(h_graph, h_hist)
+        if self.revision_variant == 'g':
+            gate = self.urgency_gate(h_graph)
+            return h_hist + gate * (h_candidate - h_hist)
+        return h_candidate
+
+    def encode_no_recurrence(self, fea_j, fea_m, fea_pairs, fea_waiting, dynamic_pair_mask):
+        h_j = self._embed_jobs(fea_j, fea_waiting)
         h_m = self.mach_mlp(fea_m)
         h_pair = self.pair_mlp(fea_pairs)
 
@@ -218,11 +246,11 @@ class BiGraphNetwork(nn.Module):
         value = self.critic(torch.cat([h_graph, h_hist], dim=-1)).squeeze(-1)
         return pi, value
 
-    def forward(self, fea_j, fea_m, fea_pairs, dynamic_pair_mask, h_hist=None):
+    def forward(self, fea_j, fea_m, fea_pairs, fea_waiting, dynamic_pair_mask, h_hist=None):
         """Single-step forward pass. Used during rollout and inference."""
         B, J, M = dynamic_pair_mask.shape
 
-        h_j = self.job_mlp(fea_j)
+        h_j = self._embed_jobs(fea_j, fea_waiting)
         h_m = self.mach_mlp(fea_m)
         h_pair = self.pair_mlp(fea_pairs)
 
@@ -256,7 +284,7 @@ class BiGraphNetwork(nn.Module):
             # Ablation: Markovian policy, no cross-step history.
             h_hist_new = torch.zeros(B, self.hist_dim, device=fea_j.device)
         else:
-            h_hist_new = self.gru_cell(h_graph, h_hist)
+            h_hist_new = self._update_history(h_graph, h_hist)
 
         # Broadcast for per-(job,machine) actor input
         a_j_exp        = a_j.unsqueeze(2).expand(-1, -1, M, -1)
@@ -282,7 +310,7 @@ class BiGraphNetwork(nn.Module):
 
         return pi, value, h_hist_new
 
-    def forward_sequence(self, fea_j_seq, fea_m_seq, fea_pairs_seq, mask_seq, h0, done_seq=None):
+    def forward_sequence(self, fea_j_seq, fea_m_seq, fea_pairs_seq, fea_waiting_seq, mask_seq, h0, done_seq=None):
         """
         Full-sequence forward with BPTT through the GRU.
         Used in PPO update to recompute pi/value under current policy parameters.
@@ -291,6 +319,7 @@ class BiGraphNetwork(nn.Module):
             fea_j_seq:     [T, B, J, Fj]
             fea_m_seq:     [T, B, M, Fm]
             fea_pairs_seq: [T, B, J, M, Fp]
+            fea_waiting_seq: [T, B, J, 4]
             mask_seq:      [T, B, J, M]  dynamic_pair_mask
             h0:            [B, hist_dim]  initial hidden (zeros at episode start)
             done_seq:      [T, B] bool, done flag after each step
@@ -306,7 +335,8 @@ class BiGraphNetwork(nn.Module):
             return x.reshape(T * B, *x.shape[2:])
 
         a_j, a_m, a_pair, g_j_global, g_m_global, h_graph = self.encode_no_recurrence(
-            _flat(fea_j_seq), _flat(fea_m_seq), _flat(fea_pairs_seq), _flat(mask_seq)
+            _flat(fea_j_seq), _flat(fea_m_seq), _flat(fea_pairs_seq),
+            _flat(fea_waiting_seq), _flat(mask_seq)
         )
         h_graph_seq = h_graph.reshape(T, B, -1)
 
@@ -318,7 +348,7 @@ class BiGraphNetwork(nn.Module):
             h = h0
             h_hist_list = []
             for t in range(T):
-                h = self.gru_cell(h_graph_seq[t], h)
+                h = self._update_history(h_graph_seq[t], h)
                 h_hist_list.append(h)
                 if done_seq is not None:
                     h = h * (~done_seq[t]).float().unsqueeze(-1)
@@ -333,8 +363,10 @@ class BiGraphNetwork(nn.Module):
 
         return pi.reshape(T, B, J * M), value.reshape(T, B), h_last
 
-    def act(self, fea_j, fea_m, fea_pairs, candidate, dynamic_pair_mask, h_hist=None):
-        pi, value, h_hist_new = self.forward(fea_j, fea_m, fea_pairs, dynamic_pair_mask, h_hist)
+    def act(self, fea_j, fea_m, fea_pairs, fea_waiting, candidate, dynamic_pair_mask, h_hist=None):
+        pi, value, h_hist_new = self.forward(
+            fea_j, fea_m, fea_pairs, fea_waiting, dynamic_pair_mask, h_hist
+        )
         dist = Categorical(pi)
         action = dist.sample()
         log_prob = dist.log_prob(action)

@@ -54,7 +54,7 @@ def test_greedy_strategy(data_set, model_path, seed, batch_size=0):
     ppo.policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     ppo.policy.eval()
 
-    env = FJSPEnv(device)
+    env = FJSPEnv(device, configs.revision_variant, configs.reward_shaping_beta)
 
     job_lengths, op_pts = data_set[0], data_set[1]
     n_total = len(job_lengths)
@@ -92,6 +92,7 @@ def test_greedy_strategy(data_set, model_path, seed, batch_size=0):
                     state.fea_j_tensor[batch_idx],
                     state.fea_m_tensor[batch_idx],
                     state.fea_pairs_tensor[batch_idx],
+                    state.fea_waiting_tensor[batch_idx],
                     state.dynamic_pair_mask_tensor[batch_idx],
                     h_hist[batch_idx],
                 )
@@ -124,7 +125,7 @@ def test_sampling_strategy(data_set, model_path, seed, n_samples):
     ppo.policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     ppo.policy.eval()
 
-    env = FJSPEnv(device)
+    env = FJSPEnv(device, configs.revision_variant, configs.reward_shaping_beta)
 
     for i in tqdm(range(len(data_set[0])), file=sys.stdout, desc="progress", colour='blue'):
         state = env.set_initial_data([data_set[0][i]] * n_samples,
@@ -140,6 +141,7 @@ def test_sampling_strategy(data_set, model_path, seed, n_samples):
                     state.fea_j_tensor[batch_idx],
                     state.fea_m_tensor[batch_idx],
                     state.fea_pairs_tensor[batch_idx],
+                    state.fea_waiting_tensor[batch_idx],
                     state.dynamic_pair_mask_tensor[batch_idx],
                     h_hist[batch_idx],
                 )
@@ -218,7 +220,7 @@ def test_beam_strategy(data_set, model_path, seed, beam_width, stochastic=False)
     ppo.policy.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     ppo.policy.eval()
 
-    env = FJSPEnv(device)
+    env = FJSPEnv(device, configs.revision_variant, configs.reward_shaping_beta)
     K = beam_width
 
     for i in tqdm(range(len(data_set[0])), file=sys.stdout, desc="progress", colour='blue'):
@@ -242,6 +244,7 @@ def test_beam_strategy(data_set, model_path, seed, beam_width, stochastic=False)
                     state.fea_j_tensor,
                     state.fea_m_tensor,
                     state.fea_pairs_tensor,
+                    state.fea_waiting_tensor,
                     state.dynamic_pair_mask_tensor,
                     h_hist,
                 )
